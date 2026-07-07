@@ -39,3 +39,36 @@ jobs:
           releaseName: "Nexalix Agora ${{ github.ref_name }}"
           releaseDraft: false
           prerelease: false
+
+      # Хеши артефактов + человеческие release notes.
+      # Текст берётся из аннотации тега; lightweight-тег -> заголовок по версии.
+      - name: Checksums and release notes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $dir = "src-tauri/target/release/bundle/nsis"
+          $lines = Get-ChildItem $dir -File | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          }
+          Set-Content checksums.txt ($lines -join "`n")
+          gh release upload $env:TAG checksums.txt --clobber
+          $ver = $env:TAG.TrimStart("v")
+          $notes = (git tag -l --format='%(contents)' $env:TAG | Out-String).Trim()
+          if (-not $notes -or $notes -eq "") { $notes = "Nexalix Agora $ver" }
+          $fence = '```'
+          $body = @(
+            $notes,
+            "",
+            "## Install",
+            "",
+            "Download **Nexalix Agora_${ver}_x64-setup.exe** below and run it (per-user, no admin). Installed copies update to this release automatically.",
+            "",
+            "## SHA-256",
+            "",
+            $fence,
+            ($lines -join "`n"),
+            $fence
+          ) -join "`n"
+          gh release edit $env:TAG --notes $body

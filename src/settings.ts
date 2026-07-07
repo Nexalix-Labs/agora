@@ -29,7 +29,8 @@ let S: Settings = { ...DEF, plugins: { ...DEF.plugins } };
 const $ = <T extends HTMLElement>(s: string) => document.querySelector<T>(s)!;
 const $$ = (s: string) => [...document.querySelectorAll<HTMLElement>(s)];
 const win = $("#window");
-const appWin = getCurrentWindow();
+// null вне Tauri (рендер страницы в браузере) — кнопки окна просто неактивны.
+const appWin = (() => { try { return getCurrentWindow(); } catch { return null; } })();
 
 const T = (k: Key) => t(S.lang, k);
 
@@ -51,8 +52,8 @@ function toast(msg: string) {
 }
 
 /* ============ TITLEBAR (Windows) ============ */
-$("#btnClose").addEventListener("click", () => { appWin.hide().catch(() => {}); });
-$("#btnMin").addEventListener("click", () => { appWin.minimize().catch(() => {}); });
+$("#btnClose").addEventListener("click", () => { appWin?.hide().catch(() => {}); });
+$("#btnMin").addEventListener("click", () => { appWin?.minimize().catch(() => {}); });
 
 /* ============ NAV ============ */
 $$(".navitem").forEach(it => it.addEventListener("click", () => {
