@@ -1,6 +1,6 @@
 [package]
 name = "nexalix-agora"
-version = "0.4.0"
+version = "0.5.0"
 description = "Nexalix Agora"
 authors = ["blyss"]
 edition = "2021"

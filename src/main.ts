@@ -29,16 +29,17 @@ interface Settings {
   recent: boolean;
   autoupdate: boolean;
   channel: string;
-  plugins: { calc: boolean; syscmd: boolean; web: boolean; files: boolean };
+  plugins: { calc: boolean; syscmd: boolean; web: boolean; files: boolean; crypto: boolean };
 }
 const DEF: Settings = {
   lang: resolveLang(), hotkey: "Alt+Space", tray: true, theme: "dark", accent: "#0098EA",
   density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable",
-  plugins: { calc: true, syscmd: true, web: true, files: true },
+  plugins: { calc: true, syscmd: true, web: true, files: true, crypto: true },
 };
 let SET: Settings = { ...DEF, plugins: { ...DEF.plugins } };
 
-const appWin = getCurrentWindow();
+// null вне Tauri (рендер страницы в браузере) — оконные вызовы становятся no-op.
+const appWin = (() => { try { return getCurrentWindow(); } catch { return null; } })();
 const WIN_W = 784; // 640 панель + 2×72 поля под тени
 
 /* ============================ ICONS ============================ */
@@ -55,6 +56,7 @@ const I = {
   moon:   S('<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z"/>'),
   lock:   S('<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>'),
   gear:   S('<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>'),
+  coin:   S('<circle cx="12" cy="12" r="9"/><path d="M14.8 9.2c-.5-.8-1.5-1.4-2.8-1.4-1.7 0-2.8.9-2.8 2.1 0 2.8 5.8 1.4 5.8 4.2 0 1.2-1.1 2.1-3 2.1-1.4 0-2.5-.6-3-1.5M12 5.8v1.9M12 16.3v1.9"/>'),
 };
 
 /* ============================ CATALOG ============================ */
@@ -137,11 +139,71 @@ function tryCalc(query: string): Entry | null {
   return null;
 }
 
+/* ============================ CRYPTO RATES ============================ */
+// Тикер или "0.5 eth" -> живая цена (CoinGecko, без ключа). Кэш 30с,
+// повторные перерисовки при вводе не дёргают сеть.
+const COINS: Record<string, { id: string; sym: string }> = {
+  btc: { id: "bitcoin", sym: "BTC" },       eth: { id: "ethereum", sym: "ETH" },
+  ton: { id: "the-open-network", sym: "TON" }, sol: { id: "solana", sym: "SOL" },
+  usdt: { id: "tether", sym: "USDT" },      usdc: { id: "usd-coin", sym: "USDC" },
+  bnb: { id: "binancecoin", sym: "BNB" },   xrp: { id: "ripple", sym: "XRP" },
+  doge: { id: "dogecoin", sym: "DOGE" },    ada: { id: "cardano", sym: "ADA" },
+  trx: { id: "tron", sym: "TRX" },          not: { id: "notcoin", sym: "NOT" },
+  ltc: { id: "litecoin", sym: "LTC" },      dot: { id: "polkadot", sym: "DOT" },
+  avax: { id: "avalanche-2", sym: "AVAX" }, link: { id: "chainlink", sym: "LINK" },
+};
+const priceCache = new Map<string, { usd: number; rub: number; t: number }>();
+const priceInFlight = new Set<string>();
+
+const fmtMoney = (v: number) =>
+  v.toLocaleString("en-US", { maximumFractionDigits: v < 1 ? 6 : 2 });
+
+async function fetchPrice(id: string) {
+  priceInFlight.add(id);
+  try {
+    const r = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=" + id + "&vs_currencies=usd,rub",
+    );
+    const j = await r.json();
+    if (j?.[id]?.usd) {
+      priceCache.set(id, { usd: j[id].usd, rub: j[id].rub ?? 0, t: Date.now() });
+      // Цена долетела — перерисовываем, если запрос всё ещё крипто-строка.
+      build(q.value);
+    }
+  } catch { /* сеть/лимит — строка останется с "…" или устаревшим кэшем */ }
+  finally { priceInFlight.delete(id); }
+}
+
+function tryCrypto(query: string): Entry | null {
+  const m = query.trim().toLowerCase().match(/^(\d+(?:[.,]\d+)?)?\s*([a-z]{2,5})$/);
+  if (!m) return null;
+  const coin = COINS[m[2]];
+  if (!coin) return null;
+  const amount = m[1] ? parseFloat(m[1].replace(",", ".")) : 1;
+  if (!isFinite(amount)) return null;
+  const p = priceCache.get(coin.id);
+  const stale = !p || Date.now() - p.t > 30_000;
+  if (stale && !priceInFlight.has(coin.id)) fetchPrice(coin.id);
+  const label = (m[1] ? amount + " " : "") + coin.sym;
+  if (!p) {
+    return { name: label, sub: "CoinGecko", kind: "answer", icon: "coin", answer: true, value: 0, display: "…" };
+  }
+  const usd = amount * p.usd;
+  return {
+    name: label,
+    sub: "≈ " + fmtMoney(amount * p.rub) + " RUB · CoinGecko",
+    kind: "answer", icon: "coin", answer: true,
+    value: usd, display: "$" + fmtMoney(usd),
+  };
+}
+
 /* ============================ RENDER (flat, quiet) ============================ */
 function build(query: string) {
   const rows: Entry[] = [];
   const calc = SET.plugins.calc ? tryCalc(query) : null;
   if (calc) rows.push(calc);
+  const crypto = !calc && SET.plugins.crypto ? tryCrypto(query) : null;
+  if (crypto) rows.push(crypto);
 
   if (!query.trim()) {
     // Пустой запрос — по умолчанию пустая панель, ничего не навязываем.
@@ -160,7 +222,7 @@ function build(query: string) {
       .sort((a, b) => b.sc - a.sc)
       .slice(0, 14)
       .forEach(x => rows.push(x.o));
-    if (!calc && SET.plugins.web) {
+    if (!calc && !crypto && SET.plugins.web) {
       rows.push({
         name: t(SET.lang, "web_for").replace("{q}", query.trim()), sub: "Google", kind: "search", icon: "web",
         url: "https://www.google.com/search?q=" + encodeURIComponent(query.trim()),
@@ -211,7 +273,7 @@ function setActive(i: number) {
 function fitWindow() {
   requestAnimationFrame(() => {
     const h = launcher.getBoundingClientRect().height + 144;
-    appWin.setSize(new LogicalSize(WIN_W, Math.ceil(h))).catch(() => {});
+    appWin?.setSize(new LogicalSize(WIN_W, Math.ceil(h))).catch(() => {});
   });
 }
 
@@ -294,7 +356,7 @@ function toast(msg: string) {
 
 /* ============================ RUN ============================ */
 async function hideAndReset() {
-  await appWin.hide().catch(() => {});
+  await appWin?.hide().catch(() => {});
   q.value = "";
   build("");
 }

@@ -17,12 +17,12 @@ interface Settings {
   recent: boolean;
   autoupdate: boolean;
   channel: string;
-  plugins: { calc: boolean; syscmd: boolean; web: boolean; files: boolean };
+  plugins: { calc: boolean; syscmd: boolean; web: boolean; files: boolean; crypto: boolean };
 }
 const DEF: Settings = {
   lang: resolveLang(), hotkey: "Alt+Space", tray: true, theme: "dark", accent: "#0098EA",
   density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable",
-  plugins: { calc: true, syscmd: true, web: true, files: true },
+  plugins: { calc: true, syscmd: true, web: true, files: true, crypto: true },
 };
 let S: Settings = { ...DEF, plugins: { ...DEF.plugins } };
 
@@ -314,6 +314,8 @@ const PLUGINS: { id: PluginId | null; nm: Key; ds: Key; raw: string }[] = [
     raw: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>' },
   { id: "syscmd", nm: "p_sys_nm", ds: "p_sys_ds",
     raw: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>' },
+  { id: "crypto", nm: "p_crypto_nm", ds: "p_crypto_ds",
+    raw: '<circle cx="12" cy="12" r="9"/><path d="M14.8 9.2c-.5-.8-1.5-1.4-2.8-1.4-1.7 0-2.8.9-2.8 2.1 0 2.8 5.8 1.4 5.8 4.2 0 1.2-1.1 2.1-3 2.1-1.4 0-2.5-.6-3-1.5M12 5.8v1.9M12 16.3v1.9"/>' },
   { id: "web", nm: "p_web_nm", ds: "p_web_ds",
     raw: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/>' },
 ];
