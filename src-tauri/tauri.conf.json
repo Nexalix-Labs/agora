@@ -1,0 +1,82 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nexalix Agora",
+  "mainBinaryName": "nexalix-agora",
+  "version": "0.4.0",
+  "identifier": "com.nexalix.agora",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://127.0.0.1:1430",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Nexalix Agora",
+        "width": 784,
+        "height": 560,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "center": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "shadow": false
+      },
+      {
+        "label": "settings",
+        "title": "Nexalix Agora — Settings",
+        "url": "settings.html",
+        "width": 900,
+        "height": 620,
+        "resizable": false,
+        "decorations": false,
+        "center": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJFMjQ3QkE5NUY1MUZERkIKUldUNy9WRmZxWHNrdm9WZngxTVRuVFZGaGxpMHZlT3FMYzFSNjd0bkRTc0N2alpxdDJIVFcrVWUK",
+      "endpoints": [
+        "https://github.com/Nexalix-Labs/agora/releases/latest/download/latest.json"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
+    "publisher": "Nexalix",
+    "copyright": "© 2026 Nexalix",
+    "category": "Productivity",
+    "shortDescription": "Nexalix Agora — быстрый лаунчер-спотлайт",
+    "longDescription": "Nexalix Agora — лаунчер в стиле Spotlight/Raycast: вызывается по Alt+Space, ищет приложения, недавние файлы и системные действия, считает выражения. Настраиваемые хоткей, тема и плагины.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["Russian", "English"],
+        "displayLanguageSelector": true,
+        "compression": "lzma",
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  }
+}

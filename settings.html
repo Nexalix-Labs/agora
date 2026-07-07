@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Nexalix Agora — Settings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./src/settings.css" />
+</head>
+<body>
+
+<div class="window" id="window">
+  <!-- TITLEBAR (Windows style: заголовок слева, кнопки справа) -->
+  <div class="titlebar" data-tauri-drag-region>
+    <div class="title" data-tauri-drag-region>
+      <svg width="16" height="16" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M9 9 L23 11 L13 23 Z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <circle cx="9" cy="9" r="2.3" fill="currentColor"/><circle cx="23" cy="11" r="2.3" fill="currentColor"/>
+        <circle cx="13" cy="23" r="2.7" fill="var(--accent)"/>
+      </svg>
+      <span class="word">nexalix</span><span class="prod">agora</span><span class="sep">·</span><span class="prod thin" data-i18n="title_settings">Settings</span>
+    </div>
+    <div class="caption">
+      <div class="cbtn" id="btnMin" title="Minimize">
+        <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><path d="M0.5 5.5h10" stroke="currentColor" stroke-width="1"/></svg>
+      </div>
+      <div class="cbtn close" id="btnClose" title="Close">
+        <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden="true"><path d="M0.9 0.9l9.2 9.2M10.1 0.9l-9.2 9.2" stroke="currentColor" stroke-width="1"/></svg>
+      </div>
+    </div>
+  </div>
+
+  <!-- BODY -->
+  <div class="body">
+    <!-- SIDEBAR -->
+    <nav class="side" id="nav">
+      <div class="navitem active" data-pane="general">
+        <span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg></span>
+        <span data-i18n="nav_general">General</span>
+      </div>
+      <div class="navitem" data-pane="hotkeys">
+        <span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M9 13h6"/></svg></span>
+        <span data-i18n="nav_hotkeys">Hotkeys</span>
+      </div>
+      <div class="navitem" data-pane="appearance">
+        <span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="17.5" cy="10.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="8.5" cy="7.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="6.5" cy="12.5" r="1.2" fill="currentColor" stroke="none"/><path d="M12 2a10 10 0 0 0 0 20c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.2 0-1 .8-1.5 1.8-1.5H16a6 6 0 0 0 6-6c0-5-4.5-8-10-8z"/></svg></span>
+        <span data-i18n="nav_appearance">Appearance</span>
+      </div>
+      <div class="navitem" data-pane="plugins">
+        <span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3v4a1 1 0 0 1-1 1H5M14 3v4a1 1 0 0 0 1 1h4M6 8v11a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8"/><path d="M9 13h6"/></svg></span>
+        <span data-i18n="nav_plugins">Plugins</span>
+      </div>
+      <div class="navitem" data-pane="about">
+        <span class="ico"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg></span>
+        <span data-i18n="nav_about">About</span>
+      </div>
+      <div class="side-foot" id="sideVer">v—</div>
+    </nav>
+
+    <!-- CONTENT -->
+    <div class="content" id="content">
+
+      <!-- ============ GENERAL ============ -->
+      <section class="pane active" data-pane="general">
+        <div class="pane-title" data-i18n="gen_title">General</div>
+        <div class="pane-sub" data-i18n="gen_sub">Startup, updates and how Agora sits in your system.</div>
+
+        <div class="group">
+          <div class="group-label" data-i18n="grp_startup">Startup</div>
+          <div class="card">
+            <div class="row">
+              <div class="txt"><div class="nm" data-i18n="login_nm">Launch at login</div><div class="ds" data-i18n="login_ds">Start Agora automatically when you sign in.</div></div>
+              <div class="ctl"><div class="switch" id="swAutostart"></div></div>
+            </div>
+            <div class="row">
+              <div class="txt"><div class="nm" data-i18n="tray_nm">Show in system tray</div><div class="ds" data-i18n="tray_ds">Keep the node icon in the notification area.</div></div>
+              <div class="ctl"><div class="switch" data-key="tray"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-label" data-i18n="grp_language">Language</div>
+          <div class="card">
+            <div class="row">
+              <div class="txt"><div class="nm" data-i18n="lang_nm">Interface language</div><div class="ds" data-i18n="lang_ds">Applies to the launcher and this window.</div></div>
+              <div class="ctl">
+                <div class="dd" id="langDD">
+                  <button class="dd-btn" id="ddBtn" type="button">
+                    <span id="ddLabel"></span>
+                    <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                  </button>
+                  <div class="dd-menu" id="ddMenu" role="listbox"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-label" data-i18n="grp_updates">Updates</div>
+          <div class="card">
+            <div class="row">
+              <div class="txt"><div class="nm" data-i18n="autoupd_nm">Automatic updates</div><div class="ds" data-i18n="autoupd_ds">Download and install new versions in the background.</div></div>
+              <div class="ctl"><div class="switch" data-key="autoupdate"></div></div>
+            </div>
+            <div class="row">
+              <div class="txt"><div class="nm" data-i18n="channel_nm">Update channel</div><div class="ds" data-i18n="channel_ds">Beta gets features earlier, with rougher edges.</div></div>
+              <div class="ctl">
+                <div class="segmented" data-seg="channel">
+                  <div class="seg" data-val="stable" data-i18n="ch_stable">Stable</div>
+                  <div class="seg" data-val="beta" data-i18n="ch_beta">Beta</div>
+                </div>
+              </div>
+            </div>
+            <div class="updatebar">
+              <span class="dotpulse"></span>
+              <div class="u-txt"><div class="u-nm" data-i18n="uptodate">You're up to date</div><div class="u-ds" id="upds">Agora</div></div>
+              <button class="btn" id="checkBtn" data-i18n="checknow">Check now</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ HOTKEYS ============ -->
+      <section class="pane" data-pane="hotkeys">
+        <div class="pane-title" data-i18n="hk_title">Hotkeys</div>
+        <div class="pane-sub" data-i18n="hk_sub">Click the shortcut, then press the keys. Esc cancels.</div>
+
+        <div class="group">
+          <div class="group-label" data-i18n="grp_global">Global</div>
+          <div class="card">
+            <div class="row">
+              <div class="txt"><div class="nm" data-i18n="summon_nm">Summon Agora</div><div class="ds" data-i18n="summon_ds">Open the launcher from anywhere.</div></div>
+              <div class="ctl"><div class="hk" id="hkSummon"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-label" data-i18n="grp_inlauncher">In the launcher</div>
+          <div class="card">
+            <div class="row">
+              <div class="txt"><div class="nm" data-i18n="quick_nm">Quick-run 1–9</div><div class="ds" data-i18n="quick_ds">Instantly open a numbered result.</div></div>
+              <div class="ctl"><div class="hk static"><span class="kbd">Ctrl</span><span class="kbd">1–9</span></div></div>
+            </div>
+            <div class="row">
+              <div class="txt"><div class="nm" data-i18n="esc_nm">Clear / hide</div><div class="ds" data-i18n="esc_ds">Clear the query, then hide the panel.</div></div>
+              <div class="ctl"><div class="hk static"><span class="kbd">Esc</span></div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ APPEARANCE ============ -->
+      <section class="pane" data-pane="appearance">
+        <div class="pane-title" data-i18n="ap_title">Appearance</div>
+        <div class="pane-sub" data-i18n="ap_sub">Theme, accent and window feel.</div>
+
+        <div class="group">
+          <div class="group-label" data-i18n="grp_theme">Theme</div>
+          <div class="card">
+            <div class="row">
+              <div class="txt"><div class="nm" data-i18n="theme_nm">Color theme</div><div class="ds" data-i18n="theme_ds">Match your system, or lock it.</div></div>
+              <div class="ctl">
+                <div class="segmented" data-seg="theme">
+                  <div class="seg" data-val="system" data-i18n="th_system">System</div>
+                  <div class="seg" data-val="dark" data-i18n="th_dark">Dark</div>
+                  <div class="seg" data-val="light" data-i18n="th_light">Light</div>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="txt"><div class="nm" data-i18n="accent_nm">Accent color</div><div class="ds" data-i18n="accent_ds">Used for the active node and highlights.</div></div>
+              <div class="ctl">
+                <div class="swatches" data-swatches>
+                  <div class="sw" data-c="#0098EA" style="background:#0098EA"></div>
+                  <div class="sw" data-c="#00C896" style="background:#00C896"></div>
+                  <div class="sw" data-c="#7A6CFF" style="background:#7A6CFF"></div>
+                  <div class="sw" data-c="#F5A623" style="background:#F5A623"></div>
+                  <div class="sw" data-c="#FF5F8F" style="background:#FF5F8F"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-label" data-i18n="grp_window">Window</div>
+          <div class="card">
+            <div class="row">
+              <div class="txt"><div class="nm" data-i18n="density_nm">Row density</div><div class="ds" data-i18n="density_ds">How much breathing room results get.</div></div>
+              <div class="ctl">
+                <div class="segmented" data-seg="density">
+                  <div class="seg" data-val="compact" data-i18n="d_compact">Compact</div>
+                  <div class="seg" data-val="cozy" data-i18n="d_cozy">Cozy</div>
+                </div>
+              </div>
+            </div>
+            <div class="row">
+              <div class="txt"><div class="nm" data-i18n="blur_nm">Blur background</div><div class="ds" data-i18n="blur_ds">Frosted glass behind the panel.</div></div>
+              <div class="ctl"><div class="switch" data-key="blur"></div></div>
+            </div>
+            <div class="row">
+              <div class="txt"><div class="nm" data-i18n="recent_nm">Show recent on open</div><div class="ds" data-i18n="recent_ds">Surface your last items before you type.</div></div>
+              <div class="ctl"><div class="switch" data-key="recent"></div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ PLUGINS ============ -->
+      <section class="pane" data-pane="plugins">
+        <div class="pane-title" data-i18n="pl_title">Plugins</div>
+        <div class="pane-sub" data-i18n="pl_sub">Extend what Agora can find and do.</div>
+
+        <div class="group">
+          <div class="group-label" data-i18n="grp_installed">Installed</div>
+          <div class="card" id="pluginList"></div>
+        </div>
+      </section>
+
+      <!-- ============ ABOUT ============ -->
+      <section class="pane" data-pane="about">
+        <div class="about">
+          <svg width="86" height="86" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect width="64" height="64" rx="14" fill="#0B0D10"/>
+            <rect x="0.5" y="0.5" width="63" height="63" rx="13.5" fill="none" stroke="#1E232B"/>
+            <g transform="translate(16 16)">
+              <path d="M9 9 L23 11 L13 23 Z" stroke="#F3F5F8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+              <circle cx="9" cy="9" r="2.4" fill="#F3F5F8"/><circle cx="23" cy="11" r="2.4" fill="#F3F5F8"/>
+              <circle cx="13" cy="23" r="2.8" fill="var(--accent)"/>
+            </g>
+          </svg>
+          <div style="margin-top:16px; font-size:22px; font-weight:600; letter-spacing:-0.02em;"><span style="color:var(--muted)">nexalix</span> agora</div>
+          <div class="pane-sub" style="max-width:360px; margin-top:8px;" data-i18n="about_tag">ἀγορά — the square where everything gathers. The launcher where all your things come together.</div>
+          <div class="v" id="aboutVer">Version — · Windows</div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<script type="module" src="./src/settings.ts"></script>
+</body>
+</html>

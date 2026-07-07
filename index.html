@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Nexalix Agora</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./src/styles.css" />
+</head>
+<body>
+
+<div class="launcher" id="launcher" role="combobox" aria-expanded="true" aria-haspopup="listbox">
+  <!-- SEARCH -->
+  <div class="search" data-tauri-drag-region>
+    <span class="mark" aria-hidden="true">
+      <svg width="22" height="22" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M9 9 L23 11 L13 23 Z" stroke="#8A8F99" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <circle cx="9" cy="9" r="2.3" fill="#8A8F99"/>
+        <circle cx="23" cy="11" r="2.3" fill="#8A8F99"/>
+        <circle cx="13" cy="23" r="2.7" fill="var(--accent)"/>
+      </svg>
+    </span>
+    <input id="q" type="text" placeholder="Search…" spellcheck="false" autocomplete="off" autofocus />
+  </div>
+
+  <div class="divider" id="divider"></div>
+
+  <!-- RESULTS -->
+  <div class="results" id="results" role="listbox"></div>
+
+  <!-- FOOTER -->
+  <div class="foot">
+    <span class="brand">
+      <svg width="14" height="14" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M9 9 L23 11 L13 23 Z" stroke="#565B64" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        <circle cx="9" cy="9" r="2.3" fill="#565B64"/>
+        <circle cx="23" cy="11" r="2.3" fill="#565B64"/>
+        <circle cx="13" cy="23" r="2.7" fill="var(--accent)"/>
+      </svg>
+      <span class="txt"><b>nexalix</b> agora</span>
+    </span>
+    <div class="foot-right">
+      <span class="hint"><span class="k">↑</span><span class="k">↓</span></span>
+      <span class="hint"><span class="k">↵</span> <span id="hintOpen">open</span></span>
+      <span class="hint"><span class="k">esc</span></span>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="./src/main.ts"></script>
+</body>
+</html>
