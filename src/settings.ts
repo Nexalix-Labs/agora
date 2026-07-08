@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { LANGS, RTL, t, resolveLang, type Key } from "./i18n";
+import { ENGINES } from "./engines";
 
 /* ============ STATE ============ */
 interface Settings {
@@ -19,8 +20,9 @@ interface Settings {
   channel: string;
   wxCity: string;
   wxLoc: { lat: number; lon: number; city: string } | null;
+  webEngine: string;
   binds: Bind[];
-  plugins: { calc: boolean; syscmd: boolean; web: boolean; files: boolean; crypto: boolean; weather: boolean };
+  plugins: { calc: boolean; syscmd: boolean; web: boolean; crypto: boolean; weather: boolean };
 }
 interface Bind {
   name: string;
@@ -32,8 +34,8 @@ interface Bind {
 const DEF: Settings = {
   lang: resolveLang(), hotkey: "Alt+Space", tray: true, theme: "dark", accent: "#0098EA",
   density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable", wxCity: "", wxLoc: null,
-  binds: [],
-  plugins: { calc: true, syscmd: true, web: true, files: true, crypto: true, weather: true },
+  webEngine: "google", binds: [],
+  plugins: { calc: true, syscmd: true, web: true, crypto: true, weather: true },
 };
 let S: Settings = { ...DEF, plugins: { ...DEF.plugins } };
 
@@ -119,6 +121,7 @@ function syncControls() {
   renderHk($("#hkSummon"), S.hotkey);
   ($("#wxCity") as HTMLInputElement).value = S.wxCity;
   syncLangDD();
+  syncEngDD();
   applyTheme();
   applyAccent();
 }
@@ -260,8 +263,54 @@ document.addEventListener("click", e => {
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeDD(); });
 $("#content").addEventListener("scroll", () => {
   closeDD();
+  engDD.classList.remove("open");
   $("#wxCityList").classList.remove("on");
   $("#bindAppList").classList.remove("on");
+});
+
+/* ============ WEB ENGINE (кастомный дропдаун) ============ */
+const engDD = $("#engDD");
+const engBtn = $("#engBtn");
+const engLabel = $("#engLabel");
+const engMenu = $("#engMenu");
+ENGINES.forEach(e => {
+  const it = document.createElement("div");
+  it.className = "dd-item";
+  it.dataset.val = e.id;
+  it.setAttribute("role", "option");
+  it.innerHTML = "<span>" + e.name + (e.ai ? " · AI" : "") + "</span>" + TICK;
+  it.addEventListener("click", () => {
+    S.webEngine = e.id;
+    engDD.classList.remove("open");
+    syncEngDD();
+    saveQuiet();
+  });
+  engMenu.appendChild(it);
+});
+function syncEngDD() {
+  const e = ENGINES.find(x => x.id === S.webEngine) ?? ENGINES[0];
+  engLabel.textContent = e.name;
+  engMenu.querySelectorAll<HTMLElement>(".dd-item").forEach(it =>
+    it.classList.toggle("sel", it.dataset.val === S.webEngine));
+}
+function openEng() {
+  engDD.classList.add("open");
+  const r = engBtn.getBoundingClientRect();
+  const h = Math.min(300, engMenu.scrollHeight);
+  const below = window.innerHeight - r.bottom - 10;
+  engMenu.style.top = (below >= h ? r.bottom + 6 : Math.max(8, r.top - h - 6)) + "px";
+  const w = Math.max(200, r.width);
+  engMenu.style.left = Math.max(8, r.right - w) + "px";
+  engMenu.style.minWidth = w + "px";
+  engMenu.querySelector<HTMLElement>(".dd-item.sel")?.scrollIntoView({ block: "nearest" });
+}
+engBtn.addEventListener("click", e => {
+  e.stopPropagation();
+  if (engDD.classList.contains("open")) engDD.classList.remove("open");
+  else openEng();
+});
+document.addEventListener("click", e => {
+  if (engDD.classList.contains("open") && !(e.target as HTMLElement).closest("#engDD")) engDD.classList.remove("open");
 });
 
 /* ============ AUTOSTART (плагин, вне settings.json) ============ */
@@ -568,15 +617,13 @@ const PLUGINS: { id: PluginId | null; nm: Key; ds: Key; raw: string }[] = [
     raw: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/>' },
   { id: "calc", nm: "p_calc_nm", ds: "p_calc_ds",
     raw: '<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M8 6h8M8 12h.01M12 12h.01M16 12h.01M8 16h.01M12 16h.01M16 16h.01"/>' },
-  { id: "files", nm: "p_files_nm", ds: "p_files_ds",
-    raw: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>' },
   { id: "syscmd", nm: "p_sys_nm", ds: "p_sys_ds",
     raw: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>' },
   { id: "crypto", nm: "p_crypto_nm", ds: "p_crypto_ds",
     raw: '<circle cx="12" cy="12" r="9"/><path d="M14.8 9.2c-.5-.8-1.5-1.4-2.8-1.4-1.7 0-2.8.9-2.8 2.1 0 2.8 5.8 1.4 5.8 4.2 0 1.2-1.1 2.1-3 2.1-1.4 0-2.5-.6-3-1.5M12 5.8v1.9M12 16.3v1.9"/>' },
   { id: "weather", nm: "p_wx_nm", ds: "p_wx_ds",
     raw: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>' },
-  { id: "web", nm: "p_web_nm", ds: "p_web_ds",
+  { id: "web", nm: "p_web2_nm", ds: "p_web2_ds",
     raw: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/>' },
 ];
 function renderPlugins() {

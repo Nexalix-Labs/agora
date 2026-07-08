@@ -83,6 +83,12 @@ const EN = {
   ver_word: "Version",
   search_ph: "Search…", hint_open: "open",
   web_for: "Search the web for “{q}”", copied: "Copied",
+  web_search: "Search {e} for “{q}”", web_ask: "Ask {e}: “{q}”",
+  act_dark: "Toggle Dark Mode", act_trash: "Empty Trash", act_sleep: "Sleep",
+  act_lock: "Lock Screen", act_settings: "Agora Settings",
+  act_g_appearance: "Appearance", act_g_power: "Power", act_g_storage: "Storage", act_g_prefs: "Preferences",
+  grp_web: "Web search", web_engine_nm: "Default engine", web_engine_ds: "Used for the web fallback. Prefixes still work: g:, c:, gpt:",
+  p_web2_nm: "Web & AI search", p_web2_ds: "Google, or ask an AI — type g:, c: (Claude), gpt:, p:",
 };
 
 export type Key = keyof typeof EN;
@@ -147,6 +153,12 @@ const RU: Partial<Record<Key, string>> = {
   ver_word: "Версия",
   search_ph: "Поиск…", hint_open: "открыть",
   web_for: "Искать в вебе: «{q}»", copied: "Скопировано",
+  web_search: "Искать в {e}: «{q}»", web_ask: "Спросить {e}: «{q}»",
+  act_dark: "Тёмная тема", act_trash: "Очистить корзину", act_sleep: "Сон",
+  act_lock: "Заблокировать экран", act_settings: "Настройки Agora",
+  act_g_appearance: "Оформление", act_g_power: "Питание", act_g_storage: "Хранилище", act_g_prefs: "Параметры",
+  grp_web: "Поиск в вебе", web_engine_nm: "Движок по умолчанию", web_engine_ds: "Для веб-фолбэка. Префиксы работают всегда: g:, c:, gpt:",
+  p_web2_nm: "Веб и AI-поиск", p_web2_ds: "Google — или спросить AI: наберите g:, c: (Claude), gpt:, p:",
 };
 
 const UK: Partial<Record<Key, string>> = {

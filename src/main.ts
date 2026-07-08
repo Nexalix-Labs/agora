@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { RTL, t, resolveLang } from "./i18n";
+import { ENGINES, engineById, engineByPrefix, engineUrl, type Engine } from "./engines";
 
 /* ============================ TYPES ============================ */
 interface Entry {
@@ -33,12 +34,14 @@ interface Settings {
   channel: string;
   wxCity: string;
   wxLoc: { lat: number; lon: number; city: string } | null;
-  plugins: { calc: boolean; syscmd: boolean; web: boolean; files: boolean; crypto: boolean; weather: boolean };
+  webEngine: string;   // движок по умолчанию для веб-поиска
+  plugins: { calc: boolean; syscmd: boolean; web: boolean; crypto: boolean; weather: boolean };
 }
 const DEF: Settings = {
   lang: resolveLang(), hotkey: "Alt+Space", tray: true, theme: "dark", accent: "#0098EA",
   density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable", wxCity: "", wxLoc: null,
-  plugins: { calc: true, syscmd: true, web: true, files: true, crypto: true, weather: true },
+  webEngine: "google",
+  plugins: { calc: true, syscmd: true, web: true, crypto: true, weather: true },
 };
 let SET: Settings = { ...DEF, plugins: { ...DEF.plugins } };
 
@@ -54,6 +57,7 @@ const I = {
   file:   S('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>'),
   folder: S('<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9L9.6 3.9A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"/>'),
   web:    S('<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/>'),
+  spark:  S('<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18 15l.7 1.8L20.5 17l-1.8.7L18 19.5l-.7-1.8L15.5 17l1.8-.7z"/>'),
   calc:   S('<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M8 6h8M8 12h.01M12 12h.01M16 12h.01M8 16h.01M12 16h.01M16 16h.01"/>'),
   power:  S('<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>'),
   trash:  S('<path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>'),
@@ -68,14 +72,33 @@ const I = {
 let APPS: Entry[] = [];
 let FILES: Entry[] = [];
 
-const ACTIONS: Entry[] = [
-  { name:'Toggle Dark Mode', sub:'Appearance', kind:'action', icon:'moon',  actionId:'dark_mode' },
-  { name:'Empty Trash',      sub:'Storage',    kind:'action', icon:'trash', actionId:'empty_trash' },
-  { name:'Sleep',            sub:'Power',      kind:'action', icon:'power', actionId:'sleep' },
-  { name:'Lock Screen',      sub:'Power',      kind:'action', icon:'lock',  actionId:'lock' },
+// Системные действия. name/sub локализуются; kw — мультиязычные поисковые
+// алиасы (латиница + кириллица), чтобы находились на любом языке интерфейса.
+interface ActionDef {
+  actionId: string;
+  icon: keyof typeof I;
+  nameKey: Parameters<typeof t>[1];
+  subKey: Parameters<typeof t>[1];
+  kw: string;
+}
+const ACTION_DEFS: ActionDef[] = [
+  { actionId: "dark_mode", icon: "moon", nameKey: "act_dark", subKey: "act_g_appearance",
+    kw: "dark mode light theme тёмная темная светлая тема оформление режим" },
+  { actionId: "empty_trash", icon: "trash", nameKey: "act_trash", subKey: "act_g_storage",
+    kw: "empty trash recycle bin корзина очистить мусор удалить" },
+  { actionId: "sleep", icon: "power", nameKey: "act_sleep", subKey: "act_g_power",
+    kw: "sleep suspend сон спящий заснуть питание" },
+  { actionId: "lock", icon: "lock", nameKey: "act_lock", subKey: "act_g_power",
+    kw: "lock screen блокировка заблокировать замок экран" },
+  { actionId: "settings", icon: "gear", nameKey: "act_settings", subKey: "act_g_prefs",
+    kw: "settings preferences настройки параметры опции конфигурация" },
 ];
-const SETTINGS_ACTION: Entry =
-  { name:'Agora Settings', sub:'Preferences', kind:'action', icon:'gear', actionId:'settings' };
+function actionEntries(lang: string): Entry[] {
+  return ACTION_DEFS.map(d => ({
+    name: t(lang, d.nameKey), sub: t(lang, d.subKey),
+    kind: "action", icon: d.icon, actionId: d.actionId, keywords: d.kw,
+  }));
+}
 
 async function refreshCatalog() {
   try {
@@ -129,16 +152,56 @@ function scoreEntry(o: Entry, query: string): number {
 }
 
 /* ============================ CALCULATOR ============================ */
+// Умный калькулятор: неявное умножение 2(3), функции sqrt/sin/log…, константы
+// pi/π/e/tau, умные проценты 200+15%. Безопасно: собираем выражение из Math.*
+// и арифметики, валидируем что чужих букв не осталось, только потом Function.
+const CALC_FUNCS = new Set([
+  "sqrt", "cbrt", "sin", "cos", "tan", "asin", "acos", "atan",
+  "abs", "round", "floor", "ceil", "trunc", "sign", "exp",
+  "min", "max", "hypot", "log2",
+]);
+
+function prepareExpr(input: string): string | null {
+  let s = input.trim().toLowerCase();
+  if (!s || !/\d|pi|π|\be\b/.test(s)) return null;
+  // Быстрый отсев: голое слово («figma») не выражение — нужен оператор,
+  // скобка с числом, функция или константа.
+  if (!/[-+*/^%()]|\b(sqrt|cbrt|sin|cos|tan|log|ln|abs|round|floor|ceil|exp|min|max|hypot|pi|tau)\b|π/.test(s)) return null;
+
+  s = s.replace(/(\d),(?=\d)/g, "$1.");                 // десятичная запятая
+  // константы
+  s = s.replace(/π/g, "(Math.PI)").replace(/\bpi\b/g, "(Math.PI)")
+       .replace(/\btau\b/g, "(2*Math.PI)").replace(/\be\b/g, "(Math.E)");
+  // функции (ln = натуральный, log = десятичный)
+  s = s.replace(/\bln\b/g, "Math.log").replace(/\blog10\b/g, "Math.log10")
+       .replace(/\blog\b/g, "Math.log10");
+  s = s.replace(/\b([a-z][a-z0-9]*)\b/g, (m) => (CALC_FUNCS.has(m) ? "Math." + m : m));
+  // неявное умножение
+  s = s.replace(/\)\s*\(/g, ")*(")                       // )(
+       .replace(/([\d.)])\s*\(/g, "$1*(")                // 2( , )(  — но не sqrt(
+       .replace(/\)\s*(?=[\d.]|Math)/g, ")*")            // )2 , )Math
+       .replace(/([\d.])\s*(?=Math)/g, "$1*");           // 2Math
+  s = s.replace(/\^/g, "**");
+  // умный процент: A ± B%  ->  A ± A*B/100
+  s = s.replace(/(\d+(?:\.\d+)?)\s*([+\-])\s*(\d+(?:\.\d+)?)\s*%/g, "$1$2$1*$3/100");
+  s = s.replace(/%/g, "/100");
+
+  // Валидация: после вычистки Math.* и чисел/операторов чужих букв быть не должно.
+  if (/[a-z]/i.test(s.replace(/Math\.[a-z0-9]+/gi, ""))) return null;
+  return s;
+}
+
 function tryCalc(query: string): Entry | null {
-  const s = query.trim();
-  if (!/^[-+*/().\d\s%^,]+$/.test(s) || !/[-+*/^%]/.test(s) || !/\d/.test(s)) return null;
+  const expr = prepareExpr(query);
+  if (!expr) return null;
   try {
-    // Запятая = десятичный разделитель (русская раскладка): 59,7 -> 59.7
-    const expr = s.replace(/,/g, ".").replace(/\^/g, "**").replace(/%/g, "/100");
-    const val = Function('"use strict";return (' + expr + ')')();
+    const val = Function('"use strict";return (' + expr + ")")();
     if (typeof val === "number" && isFinite(val)) {
       const out = Math.round(val * 1e8) / 1e8;
-      return { name: s, sub: "", kind: "answer", icon: "calc", answer: true, eq: true, value: out, display: out.toLocaleString("en-US") };
+      return {
+        name: query.trim(), sub: "", kind: "answer", icon: "calc", answer: true, eq: true,
+        value: out, display: out.toLocaleString("en-US", { maximumFractionDigits: 8 }),
+      };
     }
   } catch { /* не выражение */ }
   return null;
@@ -378,6 +441,25 @@ function tryWeather(query: string): Entry[] | null {
   ];
 }
 
+/* ============================ WEB SEARCH ============================ */
+// Префикс движка: "g: погода", "c: объясни рекурсию", "gpt: …". Пусто -> null.
+function matchEnginePrefix(query: string): { engine: Engine; text: string } | null {
+  const m = query.trim().match(/^([a-z]+):\s*(.+)$/i);
+  if (!m) return null;
+  const engine = engineByPrefix(m[1]);
+  return engine ? { engine, text: m[2].trim() } : null;
+}
+function webEntry(e: Engine, text: string): Entry {
+  const key = e.ai ? "web_ask" : "web_search";
+  return {
+    name: t(SET.lang, key).replace("{e}", e.name).replace("{q}", text),
+    sub: e.name,
+    kind: "search",
+    icon: e.ai ? "spark" : "web",
+    url: engineUrl(e, text),
+  };
+}
+
 /* ============================ RENDER (flat, quiet) ============================ */
 function build(query: string) {
   const rows: Entry[] = [];
@@ -391,13 +473,18 @@ function build(query: string) {
   if (!query.trim()) {
     // Пустой запрос — по умолчанию пустая панель, ничего не навязываем.
     // Недавние — только если включено в настройках (Show recent on open).
-    if (SET.recent && SET.plugins.files) rows.push(...FILES.slice(0, 6));
+    if (SET.recent) rows.push(...FILES.slice(0, 6));
   } else {
+    // Явный движок по префиксу: "g: …", "c: …", "gpt: …" — главный intent.
+    const pe = SET.plugins.web ? matchEnginePrefix(query) : null;
+    if (pe) rows.push(webEntry(pe.engine, pe.text));
+
+    const acts = actionEntries(SET.lang);
     const pool: Entry[] = [
       ...APPS,
-      ...(SET.plugins.files ? FILES : []),
-      ...(SET.plugins.syscmd ? ACTIONS : []),
-      SETTINGS_ACTION,
+      ...FILES, // недавние файлы всегда участвуют в поиске
+      // Системные действия — при включённом syscmd; настройки доступны всегда.
+      ...(SET.plugins.syscmd ? acts : acts.filter(a => a.actionId === "settings")),
     ];
     pool
       .map(o => ({ o, sc: scoreEntry(o, query) }))
@@ -405,11 +492,8 @@ function build(query: string) {
       .sort((a, b) => b.sc - a.sc)
       .slice(0, 14)
       .forEach(x => rows.push(x.o));
-    if (!calc && !wx && !crypto && SET.plugins.web) {
-      rows.push({
-        name: t(SET.lang, "web_for").replace("{q}", query.trim()), sub: "Google", kind: "search", icon: "web",
-        url: "https://www.google.com/search?q=" + encodeURIComponent(query.trim()),
-      });
+    if (!calc && !wx && !crypto && !pe && SET.plugins.web) {
+      rows.push(webEntry(engineById(SET.webEngine), query.trim()));
     }
   }
 

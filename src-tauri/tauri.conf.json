@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Nexalix Agora",
   "mainBinaryName": "nexalix-agora",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "identifier": "com.nexalix.agora",
   "build": {
     "frontendDist": "../dist",
