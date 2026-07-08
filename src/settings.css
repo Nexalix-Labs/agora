@@ -157,9 +157,41 @@ body {
 .dd-item .tick { color:var(--accent-hi); display:none; flex:0 0 auto; }
 .dd-item.sel .tick { display:flex; }
 
+/* text input */
+.tfield {
+  font:500 13px 'Inter',sans-serif; letter-spacing:-0.01em;
+  color:var(--fg); background:var(--raise-2);
+  border:1px solid var(--border-2); border-radius:9px;
+  padding:8px 12px; min-width:200px; outline:none;
+  transition:border-color .15s;
+}
+.tfield:focus { border-color:var(--accent); }
+.tfield::placeholder { color:var(--faint); }
+
+/* app picker list (внутри редактора хоткеев) */
+.applist {
+  position:absolute; top:calc(100% + 6px); left:0; right:0; z-index:60;
+  background:var(--window); border:1px solid var(--border-2); border-radius:10px; padding:5px;
+  max-height:240px; overflow-y:auto; display:none;
+  box-shadow:0 0 0 1px rgba(0,0,0,0.35), 0 20px 50px -14px rgba(0,0,0,0.7);
+}
+.applist.on { display:block; }
+.applist::-webkit-scrollbar { width:9px; }
+.applist::-webkit-scrollbar-thumb { background:var(--border-2); border-radius:999px; border:2px solid var(--window); }
+.applist .ai {
+  display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:7px; cursor:pointer;
+  font:500 13px 'Inter',sans-serif; color:var(--muted);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.applist .ai:hover { background:var(--raise); color:var(--fg); }
+.applist .ai img { width:18px; height:18px; object-fit:contain; flex:0 0 auto; }
+.applist .ai .ph { width:18px; height:18px; flex:0 0 auto; border-radius:4px; background:var(--raise-2); border:1px solid var(--border); }
+
 /* buttons */
 .btn { font:500 13px 'Inter',sans-serif; letter-spacing:-0.01em; padding:8px 14px; border-radius:9px; cursor:pointer; border:1px solid var(--border-2); background:var(--raise-2); color:var(--fg); transition:.14s; }
 .btn:hover { border-color:var(--accent); color:var(--accent-hi); }
+.btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+.btn.primary:hover { background:var(--accent-hi); color:#fff; }
 
 .updatebar { display:flex; align-items:center; gap:12px; padding:14px 16px; }
 .updatebar .dotpulse { width:8px; height:8px; border-radius:999px; background:var(--good); box-shadow:0 0 8px rgba(0,200,150,0.6); flex:0 0 auto; }

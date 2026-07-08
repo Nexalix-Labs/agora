@@ -491,11 +491,7 @@ fn set_settings(
 ) -> Result<(), String> {
     #[cfg(desktop)]
     {
-        let hk = value
-            .get("hotkey")
-            .and_then(|v| v.as_str())
-            .unwrap_or(DEFAULT_HOTKEY);
-        register_hotkey(&app, hk)?;
+        apply_hotkeys(&app, &value)?;
         let tray_on = value.get("tray").and_then(|v| v.as_bool()).unwrap_or(true);
         let lang = value.get("lang").and_then(|v| v.as_str()).unwrap_or("en");
         if let Some(tray) = app.tray_by_id("main-tray") {
@@ -520,23 +516,62 @@ fn set_settings(
     Ok(())
 }
 
-/// (Пере)регистрация глобального хоткея вызова. Снимает все прежние.
+/// Цель кастомного бинда: shell:AppsFolder-элементы через explorer,
+/// остальное (путь/URL/exe) — как двойной клик.
+fn run_bind_target(target: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    if target.starts_with("shell:") {
+        return shell_open_params("explorer.exe", target);
+    }
+    shell_open(target)
+}
+
+/// (Пере)регистрация ВСЕХ глобальных хоткеев: вызов лаунчера + свои бинды
+/// из настроек. Снимает прежние; ошибка любого — откат всей записи настроек.
 #[cfg(desktop)]
-fn register_hotkey(app: &AppHandle, hk: &str) -> Result<(), String> {
+fn apply_hotkeys(app: &AppHandle, settings: &serde_json::Value) -> Result<(), String> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+
+    let hk = settings
+        .get("hotkey")
+        .and_then(|v| v.as_str())
+        .unwrap_or(DEFAULT_HOTKEY);
     let sc: Shortcut = hk
         .parse()
         .map_err(|e| format!("Bad hotkey '{hk}': {e:?}"))?;
-    let gs = app.global_shortcut();
-    let _ = gs.unregister_all();
     let handle = app.clone();
     gs.on_shortcut(sc, move |_app, _sc, event| {
         if event.state() == ShortcutState::Pressed {
             toggle_window(&handle);
         }
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    if let Some(binds) = settings.get("binds").and_then(|v| v.as_array()) {
+        for b in binds {
+            let (Some(hk), Some(target)) = (
+                b.get("hotkey").and_then(|v| v.as_str()),
+                b.get("target").and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            let name = b.get("name").and_then(|v| v.as_str()).unwrap_or(hk);
+            let sc: Shortcut = hk
+                .parse()
+                .map_err(|e| format!("'{name}': bad hotkey '{hk}': {e:?}"))?;
+            let target = target.to_string();
+            gs.on_shortcut(sc, move |_app, _sc, event| {
+                if event.state() == ShortcutState::Pressed {
+                    let _ = run_bind_target(&target);
+                }
+            })
+            .map_err(|e| format!("'{name}': {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn show_settings(app: &AppHandle) {
@@ -690,13 +725,8 @@ pub fn run() {
                 app.handle()
                     .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
 
-                // Настройки: файл -> state; хоткей из настроек (fallback Alt+Space).
+                // Настройки: файл -> state; хоткеи из настроек (fallback Alt+Space).
                 let initial = read_settings_file(app.handle());
-                let hotkey = initial
-                    .get("hotkey")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(DEFAULT_HOTKEY)
-                    .to_string();
                 let tray_enabled = initial.get("tray").and_then(|v| v.as_bool()).unwrap_or(true);
                 let lang = initial
                     .get("lang")
@@ -707,6 +737,12 @@ pub fn run() {
                     .get("autoupdate")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
+
+                if let Err(e) = apply_hotkeys(app.handle(), &initial) {
+                    // Хоткей занят/битый — пробуем дефолты, иначе живём через трей.
+                    eprintln!("nexalix-agora: {e}");
+                    let _ = apply_hotkeys(app.handle(), &serde_json::json!({}));
+                }
                 app.manage(SettingsState(Mutex::new(initial)));
 
                 // Тихая проверка обновлений при старте. NSIS ставится silent,
@@ -721,14 +757,6 @@ pub fn run() {
                             let _ = update.download_and_install(|_, _| {}, || {}).await;
                         }
                     });
-                }
-
-                if let Err(e) = register_hotkey(app.handle(), &hotkey) {
-                    // Хоткей занят/битый — пробуем дефолт, иначе живём через трей.
-                    eprintln!("nexalix-agora: {e}");
-                    if hotkey != DEFAULT_HOTKEY {
-                        let _ = register_hotkey(app.handle(), DEFAULT_HOTKEY);
-                    }
                 }
 
                 // Автозапуск включаем по умолчанию только при первом запуске.

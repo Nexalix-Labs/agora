@@ -100,6 +100,16 @@
         </div>
 
         <div class="group">
+          <div class="group-label" data-i18n="grp_weather">Weather</div>
+          <div class="card">
+            <div class="row">
+              <div class="txt"><div class="nm" data-i18n="wx_city_nm">City</div><div class="ds" data-i18n="wx_city_ds">Used for a bare “weather” query. Empty — detect by IP.</div></div>
+              <div class="ctl"><input id="wxCity" class="tfield" data-i18n-ph="wx_city_ph" placeholder="e.g. Berlin" spellcheck="false" /></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="group">
           <div class="group-label" data-i18n="grp_updates">Updates</div>
           <div class="card">
             <div class="row">
@@ -150,6 +160,38 @@
               <div class="txt"><div class="nm" data-i18n="esc_nm">Clear / hide</div><div class="ds" data-i18n="esc_ds">Clear the query, then hide the panel.</div></div>
               <div class="ctl"><div class="hk static"><span class="kbd">Esc</span></div></div>
             </div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="group-label" data-i18n="grp_custom">Custom</div>
+          <div class="card" id="bindList"></div>
+
+          <div class="card" id="bindEditor" style="display:none; margin-top:10px;">
+            <div class="row">
+              <div class="txt"><input id="bindName" class="tfield" style="width:100%" data-i18n-ph="bind_name_ph" placeholder="Name" spellcheck="false" /></div>
+              <div class="ctl"><div class="hk" id="bindHk"><span class="kbd">—</span></div></div>
+            </div>
+            <div class="row">
+              <div class="txt" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                <div class="segmented" id="bindKind">
+                  <div class="seg active" data-val="app" data-i18n="bind_app">App</div>
+                  <div class="seg" data-val="cmd" data-i18n="bind_cmd">Command</div>
+                </div>
+                <div style="flex:1; min-width:230px; position:relative;">
+                  <input id="bindTarget" class="tfield" style="width:100%" placeholder="" spellcheck="false" autocomplete="off" />
+                  <div class="applist" id="bindAppList"></div>
+                </div>
+              </div>
+            </div>
+            <div class="row" style="justify-content:flex-end; gap:10px;">
+              <button class="btn" id="bindCancel" data-i18n="bind_cancel">Cancel</button>
+              <button class="btn primary" id="bindSave" data-i18n="bind_save">Save</button>
+            </div>
+          </div>
+
+          <div style="margin-top:10px; display:flex; justify-content:flex-end;">
+            <button class="btn" id="bindAdd" data-i18n="bind_add">Add hotkey</button>
           </div>
         </div>
       </section>

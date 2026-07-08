@@ -16,6 +16,7 @@ interface Entry {
   answer?: boolean;
   value?: number;
   display?: string;
+  copyText?: string;   // что копировать по Enter (по умолчанию value)
 }
 
 interface Settings {
@@ -29,12 +30,13 @@ interface Settings {
   recent: boolean;
   autoupdate: boolean;
   channel: string;
-  plugins: { calc: boolean; syscmd: boolean; web: boolean; files: boolean; crypto: boolean };
+  wxCity: string;
+  plugins: { calc: boolean; syscmd: boolean; web: boolean; files: boolean; crypto: boolean; weather: boolean };
 }
 const DEF: Settings = {
   lang: resolveLang(), hotkey: "Alt+Space", tray: true, theme: "dark", accent: "#0098EA",
-  density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable",
-  plugins: { calc: true, syscmd: true, web: true, files: true, crypto: true },
+  density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable", wxCity: "",
+  plugins: { calc: true, syscmd: true, web: true, files: true, crypto: true, weather: true },
 };
 let SET: Settings = { ...DEF, plugins: { ...DEF.plugins } };
 
@@ -57,6 +59,7 @@ const I = {
   lock:   S('<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>'),
   gear:   S('<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>'),
   coin:   S('<circle cx="12" cy="12" r="9"/><path d="M14.8 9.2c-.5-.8-1.5-1.4-2.8-1.4-1.7 0-2.8.9-2.8 2.1 0 2.8 5.8 1.4 5.8 4.2 0 1.2-1.1 2.1-3 2.1-1.4 0-2.5-.6-3-1.5M12 5.8v1.9M12 16.3v1.9"/>'),
+  sun:    S('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
 };
 
 /* ============================ CATALOG ============================ */
@@ -231,12 +234,136 @@ function tryCrypto(query: string): Entry | null {
   };
 }
 
+/* ============================ WEATHER ============================ */
+// «погода» / «weather berlin» на любом языке интерфейса. Open-Meteo без ключа.
+// Локация: город из запроса > город из настроек > IP. Кэш прогноза 10 мин.
+const WX_WORDS = new Set([
+  "weather", "погода", "wetter", "météo", "meteo", "tiempo", "clima", "pogoda",
+  "hava", "天气", "天氣", "天気", "날씨", "طقس", "هوا", "cuaca", "मौसम",
+]);
+interface WxLoc { lat: number; lon: number; city: string }
+interface WxData { temp: number; code: number; wind: number; tmax: number; tmin: number }
+let ipLoc: WxLoc | null = null;
+let ipLocBusy = false;
+const geoCache = new Map<string, WxLoc | null>();
+const geoBusy = new Set<string>();
+const wxCache = new Map<string, { t: number; d: WxData }>();
+const wxBusy = new Set<string>();
+let wxT: ReturnType<typeof setTimeout> | null = null;
+
+function wxCond(code: number): string {
+  const k =
+    code === 0 ? "wx_clear" :
+    code <= 2 ? "wx_partly" :
+    code === 3 ? "wx_cloudy" :
+    code <= 48 ? "wx_fog" :
+    code <= 57 ? "wx_drizzle" :
+    code <= 67 ? "wx_rain" :
+    code <= 77 ? "wx_snow" :
+    code <= 82 ? "wx_rain" :
+    code <= 86 ? "wx_snow" : "wx_storm";
+  return t(SET.lang, k as Parameters<typeof t>[1]);
+}
+const deg = (v: number) => (v > 0 ? "+" : "") + Math.round(v) + "°";
+
+async function fetchIpLoc() {
+  ipLocBusy = true;
+  try {
+    const j = await (await fetch("https://ipwho.is/")).json();
+    if (j?.success && j.latitude) {
+      ipLoc = { lat: j.latitude, lon: j.longitude, city: j.city ?? "" };
+      build(q.value);
+    }
+  } catch { /* оффлайн */ }
+  finally { ipLocBusy = false; }
+}
+
+async function fetchGeo(city: string) {
+  geoBusy.add(city);
+  try {
+    const j = await (await fetch(
+      "https://geocoding-api.open-meteo.com/v1/search?count=1&language=" + SET.lang + "&name=" + encodeURIComponent(city),
+    )).json();
+    const r = j?.results?.[0];
+    geoCache.set(city, r ? { lat: r.latitude, lon: r.longitude, city: r.name } : null);
+    if (r) build(q.value);
+  } catch { /* не кэшируем отрицательно */ }
+  finally { geoBusy.delete(city); }
+}
+
+async function fetchWx(loc: WxLoc) {
+  const key = loc.lat.toFixed(2) + "," + loc.lon.toFixed(2);
+  wxBusy.add(key);
+  try {
+    const j = await (await fetch(
+      "https://api.open-meteo.com/v1/forecast?latitude=" + loc.lat + "&longitude=" + loc.lon +
+      "&current=temperature_2m,weather_code,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min" +
+      "&wind_speed_unit=ms&timezone=auto&forecast_days=1",
+    )).json();
+    if (j?.current) {
+      wxCache.set(key, {
+        t: Date.now(),
+        d: {
+          temp: j.current.temperature_2m, code: j.current.weather_code, wind: j.current.wind_speed_10m,
+          tmax: j.daily?.temperature_2m_max?.[0] ?? j.current.temperature_2m,
+          tmin: j.daily?.temperature_2m_min?.[0] ?? j.current.temperature_2m,
+        },
+      });
+      build(q.value);
+    }
+  } catch { /* сеть */ }
+  finally { wxBusy.delete(key); }
+}
+
+function tryWeather(query: string): Entry | null {
+  const parts = query.trim().toLowerCase().split(/\s+/);
+  if (!parts.length || !WX_WORDS.has(parts[0])) return null;
+  const cityQ = parts.slice(1).join(" ") || SET.wxCity.trim().toLowerCase();
+
+  // 1) локация
+  let loc: WxLoc | null = null;
+  if (cityQ) {
+    if (!geoCache.has(cityQ)) {
+      if (wxT) clearTimeout(wxT);
+      wxT = setTimeout(() => { if (!geoBusy.has(cityQ)) fetchGeo(cityQ); }, 350);
+    }
+    loc = geoCache.get(cityQ) ?? null;
+    if (geoCache.has(cityQ) && !loc) return null; // город не нашёлся
+  } else {
+    if (!ipLoc && !ipLocBusy) fetchIpLoc();
+    loc = ipLoc;
+  }
+  const pending: Entry = { name: "…", sub: "Open-Meteo", kind: "answer", icon: "sun", answer: true, value: 0, display: "…" };
+  if (!loc) return pending;
+
+  // 2) прогноз
+  const key = loc.lat.toFixed(2) + "," + loc.lon.toFixed(2);
+  const w = wxCache.get(key);
+  const stale = !w || Date.now() - w.t > 600_000;
+  if (stale && !wxBusy.has(key)) fetchWx(loc);
+  if (!w) { pending.name = loc.city; return pending; }
+
+  const L = SET.lang;
+  const d = w.d;
+  const summary = deg(d.temp) + " " + loc.city + " — " + wxCond(d.code);
+  return {
+    name: loc.city + " — " + wxCond(d.code),
+    sub: t(L, "wx_high") + " " + deg(d.tmax) + " · " + t(L, "wx_low") + " " + deg(d.tmin) +
+         " · " + t(L, "wx_wind") + " " + Math.round(d.wind) + " " + t(L, "wx_ms"),
+    kind: "answer", icon: "sun", answer: true,
+    value: 0, display: deg(d.temp),
+    copyText: summary,
+  };
+}
+
 /* ============================ RENDER (flat, quiet) ============================ */
 function build(query: string) {
   const rows: Entry[] = [];
   const calc = SET.plugins.calc ? tryCalc(query) : null;
   if (calc) rows.push(calc);
-  const crypto = !calc && SET.plugins.crypto ? tryCrypto(query) : null;
+  const wx = !calc && SET.plugins.weather ? tryWeather(query) : null;
+  if (wx) rows.push(wx);
+  const crypto = !calc && !wx && SET.plugins.crypto ? tryCrypto(query) : null;
   if (crypto) rows.push(crypto);
 
   if (!query.trim()) {
@@ -256,7 +383,7 @@ function build(query: string) {
       .sort((a, b) => b.sc - a.sc)
       .slice(0, 14)
       .forEach(x => rows.push(x.o));
-    if (!calc && !crypto && SET.plugins.web) {
+    if (!calc && !wx && !crypto && SET.plugins.web) {
       rows.push({
         name: t(SET.lang, "web_for").replace("{q}", query.trim()), sub: "Google", kind: "search", icon: "web",
         url: "https://www.google.com/search?q=" + encodeURIComponent(query.trim()),
@@ -398,7 +525,7 @@ async function hideAndReset() {
 async function run(o: Entry) {
   if (!o) return;
   if (o.answer) {
-    try { await navigator.clipboard.writeText(String(o.value)); } catch { /* нет фокуса — не критично */ }
+    try { await navigator.clipboard.writeText(o.copyText ?? String(o.value)); } catch { /* нет фокуса — не критично */ }
     toast(t(SET.lang, "copied") + "  " + o.display);
     return;
   }

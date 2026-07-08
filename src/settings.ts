@@ -17,12 +17,22 @@ interface Settings {
   recent: boolean;
   autoupdate: boolean;
   channel: string;
-  plugins: { calc: boolean; syscmd: boolean; web: boolean; files: boolean; crypto: boolean };
+  wxCity: string;
+  binds: Bind[];
+  plugins: { calc: boolean; syscmd: boolean; web: boolean; files: boolean; crypto: boolean; weather: boolean };
+}
+interface Bind {
+  name: string;
+  hotkey: string;
+  kind: "app" | "cmd";
+  target: string;   // shell:AppsFolder\... или путь/URL/команда
+  label?: string;
 }
 const DEF: Settings = {
   lang: resolveLang(), hotkey: "Alt+Space", tray: true, theme: "dark", accent: "#0098EA",
-  density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable",
-  plugins: { calc: true, syscmd: true, web: true, files: true, crypto: true },
+  density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable", wxCity: "",
+  binds: [],
+  plugins: { calc: true, syscmd: true, web: true, files: true, crypto: true, weather: true },
 };
 let S: Settings = { ...DEF, plugins: { ...DEF.plugins } };
 
@@ -69,9 +79,13 @@ function applyI18n() {
   $$("[data-i18n]").forEach(el => {
     el.textContent = t(S.lang, el.dataset.i18n as Key);
   });
+  $$("[data-i18n-ph]").forEach(el => {
+    (el as HTMLInputElement).placeholder = t(S.lang, el.dataset.i18nPh as Key);
+  });
   $("#upds").textContent = "Agora " + version + " · " + T("checked_now");
   $("#aboutVer").textContent = T("ver_word") + " " + version + " · Windows";
   renderPlugins();
+  renderBinds();
 }
 
 /* ============ THEME / ACCENT (live, в самом окне настроек) ============ */
@@ -102,10 +116,16 @@ function syncControls() {
   $$("[data-swatches] .sw").forEach(sw =>
     sw.classList.toggle("sel", (sw.dataset.c ?? "").toLowerCase() === S.accent.toLowerCase()));
   renderHk($("#hkSummon"), S.hotkey);
+  ($("#wxCity") as HTMLInputElement).value = S.wxCity;
   syncLangDD();
   applyTheme();
   applyAccent();
 }
+
+$("#wxCity").addEventListener("change", () => {
+  S.wxCity = ($("#wxCity") as HTMLInputElement).value.trim();
+  saveQuiet();
+});
 
 $$(".switch[data-key]").forEach(sw => {
   const key = sw.dataset.key as "tray" | "blur" | "recent" | "autoupdate";
@@ -207,23 +227,25 @@ swAuto.addEventListener("click", async () => {
   }
 });
 
-/* ============ HOTKEY RECORDER ============ */
+/* ============ HOTKEY RECORDER (общий: summon + свои бинды) ============ */
 function renderHk(el: HTMLElement, combo: string) {
   el.innerHTML = combo.split("+").map(k => '<span class="kbd">' + k + '</span>').join("");
 }
-let recording = false;
-const hkEl = $("#hkSummon");
-hkEl.addEventListener("click", () => {
-  if (recording) return;
-  recording = true;
-  hkEl.classList.add("recording");
-  hkEl.innerHTML = '<span class="rec">' + T("recording") + '</span>';
-});
-function stopRec() {
-  if (!recording) return;
-  recording = false;
-  hkEl.classList.remove("recording");
-  renderHk(hkEl, S.hotkey);
+let recEl: HTMLElement | null = null;
+let recDone: ((combo: string | null) => void) | null = null;
+
+function startRec(el: HTMLElement, done: (combo: string | null) => void) {
+  if (recEl) cancelRec();
+  recEl = el;
+  recDone = done;
+  el.classList.add("recording");
+  el.innerHTML = '<span class="rec">' + T("recording") + '</span>';
+}
+function cancelRec() {
+  const el = recEl, d = recDone;
+  recEl = null; recDone = null;
+  el?.classList.remove("recording");
+  d?.(null);
 }
 // e.key -> имя клавиши в формате global-shortcut ("Alt+Space", "Ctrl+Shift+K").
 function keyName(k: string): string | null {
@@ -238,36 +260,199 @@ function keyName(k: string): string | null {
   return map[k] ?? null;
 }
 document.addEventListener("keydown", e => {
-  if (!recording) return;
+  if (!recEl) return;
   e.preventDefault();
-  if (e.key === "Escape") { stopRec(); return; }
+  if (e.key === "Escape") { cancelRec(); return; }
   const mods: string[] = [];
   if (e.ctrlKey) mods.push("Ctrl");
   if (e.altKey) mods.push("Alt");
   if (e.shiftKey) mods.push("Shift");
   if (e.metaKey) mods.push("Super");
   if (["Control", "Alt", "Shift", "Meta"].includes(e.key)) {
-    hkEl.innerHTML = mods.map(m => '<span class="kbd">' + m + '</span>').join("") + '<span class="rec">…</span>';
+    recEl.innerHTML = mods.map(m => '<span class="kbd">' + m + '</span>').join("") + '<span class="rec">…</span>';
     return;
   }
   const k = keyName(e.key);
   if (!k || !mods.length) return; // глобальный хоткей без модификатора не даём
-  const combo = [...mods, k].join("+");
-  const prev = S.hotkey;
-  S.hotkey = combo;
-  recording = false;
-  hkEl.classList.remove("recording");
-  renderHk(hkEl, combo);
-  save().catch(err => {
-    // Rust не смог распарсить/зарегистрировать — откатываемся.
-    S.hotkey = prev;
-    renderHk(hkEl, prev);
-    saveQuiet();
-    toast(String(err));
-  });
+  const el = recEl, d = recDone;
+  recEl = null; recDone = null;
+  el.classList.remove("recording");
+  d?.([...mods, k].join("+"));
 });
 document.addEventListener("click", e => {
-  if (recording && !(e.target as HTMLElement).closest("#hkSummon")) stopRec();
+  if (recEl && !(e.target as HTMLElement).closest(".hk")) cancelRec();
+});
+
+const hkEl = $("#hkSummon");
+hkEl.addEventListener("click", () => {
+  if (recEl === hkEl) return;
+  startRec(hkEl, combo => {
+    if (!combo) { renderHk(hkEl, S.hotkey); return; }
+    const prev = S.hotkey;
+    S.hotkey = combo;
+    renderHk(hkEl, combo);
+    save().catch(err => {
+      // Rust не смог распарсить/зарегистрировать — откатываемся.
+      S.hotkey = prev;
+      renderHk(hkEl, prev);
+      saveQuiet();
+      toast(String(err));
+    });
+  });
+});
+
+/* ============ CUSTOM BINDS ============ */
+const bindEditor = $("#bindEditor");
+const bindHk = $("#bindHk");
+const bindName = $("#bindName") as HTMLInputElement;
+const bindTarget = $("#bindTarget") as HTMLInputElement;
+const bindAppList = $("#bindAppList");
+let editorCombo: string | null = null;
+let editorKind: "app" | "cmd" = "app";
+let editorApp: { name: string; path: string } | null = null;
+interface AppEntry { name: string; path: string; keywords?: string }
+let appsCache: AppEntry[] | null = null;
+
+async function loadApps(): Promise<AppEntry[]> {
+  if (!appsCache) {
+    try { appsCache = await invoke<AppEntry[]>("index_apps"); } catch { appsCache = []; }
+  }
+  return appsCache;
+}
+
+function bindLabel(b: Bind): string {
+  return b.label ?? b.target;
+}
+
+function renderBinds() {
+  const list = $("#bindList");
+  list.innerHTML = "";
+  if (!S.binds.length) {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = '<div class="txt"><div class="ds">' + T("bind_empty") + '</div></div>';
+    list.appendChild(row);
+    return;
+  }
+  S.binds.forEach((b, i) => {
+    const row = document.createElement("div");
+    row.className = "row";
+    const kbds = b.hotkey.split("+").map(k => '<span class="kbd">' + k + '</span>').join("");
+    row.innerHTML =
+      '<div class="txt"><div class="nm"></div><div class="ds"></div></div>' +
+      '<div class="ctl" style="display:flex; align-items:center; gap:10px;">' +
+      '<div class="hk static">' + kbds + '</div>' +
+      '<button class="btn" data-del="' + i + '" title="Delete">✕</button></div>';
+    row.querySelector<HTMLElement>(".nm")!.textContent = b.name;
+    row.querySelector<HTMLElement>(".ds")!.textContent = bindLabel(b);
+    list.appendChild(row);
+  });
+  list.querySelectorAll<HTMLElement>("[data-del]").forEach(btn => btn.addEventListener("click", () => {
+    const i = +btn.dataset.del!;
+    const removed = S.binds.splice(i, 1);
+    save().then(renderBinds).catch(err => {
+      S.binds.splice(i, 0, ...removed);
+      renderBinds();
+      toast(String(err));
+    });
+  }));
+}
+
+function resetEditor() {
+  editorCombo = null;
+  editorKind = "app";
+  editorApp = null;
+  bindName.value = "";
+  bindTarget.value = "";
+  bindHk.innerHTML = '<span class="kbd">—</span>';
+  bindAppList.classList.remove("on");
+  $("#bindKind").querySelectorAll<HTMLElement>(".seg").forEach(s =>
+    s.classList.toggle("active", s.dataset.val === "app"));
+  bindTarget.placeholder = T("bind_search_ph");
+}
+
+$("#bindAdd").addEventListener("click", () => {
+  resetEditor();
+  bindEditor.style.display = "";
+  loadApps();
+  bindName.focus();
+});
+$("#bindCancel").addEventListener("click", () => { bindEditor.style.display = "none"; });
+
+bindHk.addEventListener("click", () => {
+  if (recEl === bindHk) return;
+  startRec(bindHk, combo => {
+    if (combo) editorCombo = combo;
+    if (editorCombo) renderHk(bindHk, editorCombo);
+    else bindHk.innerHTML = '<span class="kbd">—</span>';
+  });
+});
+
+$("#bindKind").querySelectorAll<HTMLElement>(".seg").forEach(s => s.addEventListener("click", () => {
+  editorKind = (s.dataset.val as "app" | "cmd") ?? "app";
+  $("#bindKind").querySelectorAll<HTMLElement>(".seg").forEach(x => x.classList.toggle("active", x === s));
+  editorApp = null;
+  bindTarget.value = "";
+  bindAppList.classList.remove("on");
+  bindTarget.placeholder = T(editorKind === "app" ? "bind_search_ph" : "bind_cmd_ph");
+}));
+
+bindTarget.addEventListener("input", async () => {
+  if (editorKind !== "app") return;
+  editorApp = null;
+  const qs = bindTarget.value.trim().toLowerCase();
+  if (!qs) { bindAppList.classList.remove("on"); return; }
+  const apps = await loadApps();
+  const hits = apps
+    .filter(a => a.name.toLowerCase().includes(qs) || (a.keywords ?? "").toLowerCase().includes(qs))
+    .slice(0, 8);
+  bindAppList.innerHTML = "";
+  hits.forEach(a => {
+    const it = document.createElement("div");
+    it.className = "ai";
+    it.innerHTML = '<span class="ph"></span><span></span>';
+    it.querySelector<HTMLElement>("span:last-child")!.textContent = a.name;
+    invoke<string | null>("app_icon", { path: a.path }).then(uri => {
+      if (!uri) return;
+      const img = document.createElement("img");
+      img.src = uri;
+      it.querySelector(".ph")?.replaceWith(img);
+    }).catch(() => {});
+    it.addEventListener("click", () => {
+      editorApp = { name: a.name, path: a.path };
+      bindTarget.value = a.name;
+      if (!bindName.value.trim()) bindName.value = a.name;
+      bindAppList.classList.remove("on");
+    });
+    bindAppList.appendChild(it);
+  });
+  bindAppList.classList.toggle("on", hits.length > 0);
+});
+document.addEventListener("click", e => {
+  if (!(e.target as HTMLElement).closest("#bindAppList") && e.target !== bindTarget) {
+    bindAppList.classList.remove("on");
+  }
+});
+
+$("#bindSave").addEventListener("click", () => {
+  const name = bindName.value.trim();
+  const target = editorKind === "app" ? editorApp?.path : bindTarget.value.trim();
+  if (!editorCombo || !name || !target) { toast(T("bind_press")); return; }
+  const bind: Bind = {
+    name,
+    hotkey: editorCombo,
+    kind: editorKind,
+    target,
+    label: editorKind === "app" ? editorApp!.name : target,
+  };
+  S.binds.push(bind);
+  save().then(() => {
+    bindEditor.style.display = "none";
+    renderBinds();
+  }).catch(err => {
+    S.binds.pop();
+    toast(String(err));
+  });
 });
 
 /* ============ UPDATES (настоящие: GitHub Releases + подпись) ============ */
@@ -316,6 +501,8 @@ const PLUGINS: { id: PluginId | null; nm: Key; ds: Key; raw: string }[] = [
     raw: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>' },
   { id: "crypto", nm: "p_crypto_nm", ds: "p_crypto_ds",
     raw: '<circle cx="12" cy="12" r="9"/><path d="M14.8 9.2c-.5-.8-1.5-1.4-2.8-1.4-1.7 0-2.8.9-2.8 2.1 0 2.8 5.8 1.4 5.8 4.2 0 1.2-1.1 2.1-3 2.1-1.4 0-2.5-.6-3-1.5M12 5.8v1.9M12 16.3v1.9"/>' },
+  { id: "weather", nm: "p_wx_nm", ds: "p_wx_ds",
+    raw: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>' },
   { id: "web", nm: "p_web_nm", ds: "p_web_ds",
     raw: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/>' },
 ];
@@ -350,6 +537,7 @@ function renderPlugins() {
       const p = v as Partial<Settings>;
       S = { ...DEF, ...p, plugins: { ...DEF.plugins, ...(p.plugins ?? {}) } };
       if (!S.lang) S.lang = resolveLang();
+      if (!Array.isArray(S.binds)) S.binds = [];
     }
   } catch { /* дефолты */ }
   try {
