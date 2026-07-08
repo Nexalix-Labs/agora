@@ -14,6 +14,7 @@ interface Entry {
   actionId?: string;   // для action — команда в Rust
   url?: string;        // для web-поиска
   answer?: boolean;
+  eq?: boolean;        // рисовать " =" после имени (калькулятор/курсы)
   value?: number;
   display?: string;
   copyText?: string;   // что копировать по Enter (по умолчанию value)
@@ -31,11 +32,12 @@ interface Settings {
   autoupdate: boolean;
   channel: string;
   wxCity: string;
+  wxLoc: { lat: number; lon: number; city: string } | null;
   plugins: { calc: boolean; syscmd: boolean; web: boolean; files: boolean; crypto: boolean; weather: boolean };
 }
 const DEF: Settings = {
   lang: resolveLang(), hotkey: "Alt+Space", tray: true, theme: "dark", accent: "#0098EA",
-  density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable", wxCity: "",
+  density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable", wxCity: "", wxLoc: null,
   plugins: { calc: true, syscmd: true, web: true, files: true, crypto: true, weather: true },
 };
 let SET: Settings = { ...DEF, plugins: { ...DEF.plugins } };
@@ -136,7 +138,7 @@ function tryCalc(query: string): Entry | null {
     const val = Function('"use strict";return (' + expr + ')')();
     if (typeof val === "number" && isFinite(val)) {
       const out = Math.round(val * 1e8) / 1e8;
-      return { name: s, sub: "", kind: "answer", icon: "calc", answer: true, value: out, display: out.toLocaleString("en-US") };
+      return { name: s, sub: "", kind: "answer", icon: "calc", answer: true, eq: true, value: out, display: out.toLocaleString("en-US") };
     }
   } catch { /* не выражение */ }
   return null;
@@ -223,13 +225,13 @@ function tryCrypto(query: string): Entry | null {
   if (stale && !priceInFlight.has(coin.id)) fetchPrice(coin.id);
   const label = (hasAmount ? amount + " " : "") + coin.sym;
   if (!p) {
-    return { name: label, sub: coin.name + " · CoinGecko", kind: "answer", icon: "coin", answer: true, value: 0, display: "…" };
+    return { name: label, sub: coin.name + " · CoinGecko", kind: "answer", icon: "coin", answer: true, eq: true, value: 0, display: "…" };
   }
   const usd = amount * p.usd;
   return {
     name: label,
     sub: coin.name + " · ≈ " + fmtMoney(amount * p.rub) + " RUB · CoinGecko",
-    kind: "answer", icon: "coin", answer: true,
+    kind: "answer", icon: "coin", answer: true, eq: true,
     value: usd, display: "$" + fmtMoney(usd),
   };
 }
@@ -242,7 +244,10 @@ const WX_WORDS = new Set([
   "hava", "天气", "天氣", "天気", "날씨", "طقس", "هوا", "cuaca", "मौसम",
 ]);
 interface WxLoc { lat: number; lon: number; city: string }
-interface WxData { temp: number; code: number; wind: number; tmax: number; tmin: number }
+interface WxData {
+  temp: number; code: number; wind: number; tmax: number; tmin: number;
+  morn: number | null; day: number | null; eve: number | null; precip: number | null;
+}
 const geoCache = new Map<string, WxLoc | null>();
 const geoBusy = new Set<string>();
 const wxCache = new Map<string, { t: number; d: WxData }>();
@@ -284,15 +289,24 @@ async function fetchWx(loc: WxLoc) {
     const j = await (await fetch(
       "https://api.open-meteo.com/v1/forecast?latitude=" + loc.lat + "&longitude=" + loc.lon +
       "&current=temperature_2m,weather_code,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min" +
+      "&hourly=temperature_2m,precipitation_probability" +
       "&wind_speed_unit=ms&timezone=auto&forecast_days=1",
     )).json();
     if (j?.current) {
+      // Часы локальные (timezone=auto): срезы утро 09:00 / день 15:00 / вечер 21:00.
+      const at = (hh: string): number | null => {
+        const i = (j.hourly?.time ?? []).findIndex((s: string) => s.endsWith("T" + hh));
+        return i >= 0 ? j.hourly.temperature_2m?.[i] ?? null : null;
+      };
+      const probs: number[] = j.hourly?.precipitation_probability ?? [];
       wxCache.set(key, {
         t: Date.now(),
         d: {
           temp: j.current.temperature_2m, code: j.current.weather_code, wind: j.current.wind_speed_10m,
           tmax: j.daily?.temperature_2m_max?.[0] ?? j.current.temperature_2m,
           tmin: j.daily?.temperature_2m_min?.[0] ?? j.current.temperature_2m,
+          morn: at("09:00"), day: at("15:00"), eve: at("21:00"),
+          precip: probs.length ? Math.max(...probs) : null,
         },
       });
       build(q.value);
@@ -301,44 +315,67 @@ async function fetchWx(loc: WxLoc) {
   finally { wxBusy.delete(key); }
 }
 
-function tryWeather(query: string): Entry | null {
+function tryWeather(query: string): Entry[] | null {
   const parts = query.trim().toLowerCase().split(/\s+/);
   if (!parts.length || !WX_WORDS.has(parts[0])) return null;
   // Только явный город: из запроса или из настроек. Никакого гео по IP —
   // ничего не звоним без запроса пользователя.
-  const cityQ = parts.slice(1).join(" ") || SET.wxCity.trim().toLowerCase();
-  if (!cityQ) {
-    return { name: t(SET.lang, "wx_nocity"), sub: "Open-Meteo", kind: "action", icon: "sun", actionId: "settings" };
+  const cityArg = parts.slice(1).join(" ");
+  let loc: WxLoc | null = null;
+  if (!cityArg && SET.wxLoc) {
+    // город выбран в настройках из саджеста — координаты уже известны
+    loc = SET.wxLoc;
+  } else {
+    const cityQ = cityArg || SET.wxCity.trim().toLowerCase();
+    if (!cityQ) {
+      return [{ name: t(SET.lang, "wx_nocity"), sub: "Open-Meteo", kind: "action", icon: "sun", actionId: "settings" }];
+    }
+    if (!geoCache.has(cityQ)) {
+      if (wxT) clearTimeout(wxT);
+      wxT = setTimeout(() => { if (!geoBusy.has(cityQ)) fetchGeo(cityQ); }, 350);
+    }
+    loc = geoCache.get(cityQ) ?? null;
+    if (geoCache.has(cityQ) && !loc) return null; // город не нашёлся
+    if (!loc) return [{ name: "…", sub: "Open-Meteo", kind: "answer", icon: "sun", answer: true, value: 0, display: "…" }];
   }
-
-  // 1) локация
-  if (!geoCache.has(cityQ)) {
-    if (wxT) clearTimeout(wxT);
-    wxT = setTimeout(() => { if (!geoBusy.has(cityQ)) fetchGeo(cityQ); }, 350);
-  }
-  const loc = geoCache.get(cityQ) ?? null;
-  if (geoCache.has(cityQ) && !loc) return null; // город не нашёлся
-  const pending: Entry = { name: "…", sub: "Open-Meteo", kind: "answer", icon: "sun", answer: true, value: 0, display: "…" };
-  if (!loc) return pending;
 
   // 2) прогноз
   const key = loc.lat.toFixed(2) + "," + loc.lon.toFixed(2);
   const w = wxCache.get(key);
   const stale = !w || Date.now() - w.t > 600_000;
   if (stale && !wxBusy.has(key)) fetchWx(loc);
-  if (!w) { pending.name = loc.city; return pending; }
+  if (!w) {
+    return [{ name: loc.city, sub: "Open-Meteo", kind: "answer", icon: "sun", answer: true, value: 0, display: "…" }];
+  }
 
   const L = SET.lang;
   const d = w.d;
-  const summary = deg(d.temp) + " " + loc.city + " — " + wxCond(d.code);
-  return {
-    name: loc.city + " — " + wxCond(d.code),
-    sub: t(L, "wx_high") + " " + deg(d.tmax) + " · " + t(L, "wx_low") + " " + deg(d.tmin) +
-         " · " + t(L, "wx_wind") + " " + Math.round(d.wind) + " " + t(L, "wx_ms"),
-    kind: "answer", icon: "sun", answer: true,
-    value: 0, display: deg(d.temp),
-    copyText: summary,
-  };
+  const dayline = [
+    d.morn != null ? t(L, "wx_morn") + " " + deg(d.morn) : "",
+    d.day != null ? t(L, "wx_day") + " " + deg(d.day) : "",
+    d.eve != null ? t(L, "wx_eve") + " " + deg(d.eve) : "",
+    d.precip != null ? t(L, "wx_precip") + " " + Math.round(d.precip) + "%" : "",
+  ].filter(Boolean).join(" · ");
+  const range = t(L, "wx_high") + " " + deg(d.tmax) + " · " + t(L, "wx_low") + " " + deg(d.tmin) +
+    " · " + t(L, "wx_wind") + " " + Math.round(d.wind) + " " + t(L, "wx_ms");
+  const summary = deg(d.temp) + " " + loc.city + " — " + wxCond(d.code) + " (" + range + (dayline ? " · " + dayline : "") + ")";
+  return [
+    {
+      name: loc.city + " — " + wxCond(d.code),
+      sub: "", kind: "answer", icon: "sun", answer: true,
+      value: 0, display: deg(d.temp), copyText: summary,
+    },
+    {
+      name: range,
+      sub: "", kind: "answer", icon: "sun", answer: true,
+      value: 0, display: "", copyText: summary,
+    },
+    ...(dayline ? [{
+      name: dayline,
+      sub: "", kind: "answer" as const, icon: "sun" as const, answer: true,
+      value: 0, display: "", copyText: summary,
+    }] : []),
+  ];
 }
 
 /* ============================ RENDER (flat, quiet) ============================ */
@@ -347,7 +384,7 @@ function build(query: string) {
   const calc = SET.plugins.calc ? tryCalc(query) : null;
   if (calc) rows.push(calc);
   const wx = !calc && SET.plugins.weather ? tryWeather(query) : null;
-  if (wx) rows.push(wx);
+  if (wx) rows.push(...wx);
   const crypto = !calc && !wx && SET.plugins.crypto ? tryCrypto(query) : null;
   if (crypto) rows.push(crypto);
 
@@ -387,9 +424,9 @@ function build(query: string) {
     // Реальная иконка уже в кэше — рисуем <img> сразу (без мигания при вводе).
     const cached = o.path ? iconCache.get(o.path) : undefined;
     const glyphInner = cached ? '<img alt="" src="' + cached + '">' : I[o.icon];
-    const nameHtml = o.answer ? esc(o.name) + " =" : highlight(o.name, query);
+    const nameHtml = o.answer && o.eq ? esc(o.name) + " =" : o.answer ? esc(o.name) : highlight(o.name, query);
     const tail = o.answer
-      ? '<span class="answer-val">' + esc(o.display!) + '</span>'
+      ? (o.display ? '<span class="answer-val">' + esc(o.display) + '</span>' : '')
       : (o.sub ? '<span class="tail">' + esc(o.sub) + '</span>' : '');
     row.innerHTML = '<span class="glyph">' + glyphInner + '</span><span class="name">' + nameHtml + '</span>' + tail;
     row.addEventListener("mousemove", () => setActive(idx));
@@ -567,7 +604,43 @@ listen("focus-input", () => {
 listen("settings-changed", (e) => applySettings(e.payload));
 
 /* ============================ INIT ============================ */
-invoke("get_settings").then(applySettings).catch(() => applySettings({}));
-build("");
+// Демо-режим для промо-скриншотов (headless-рендер вне Tauri):
+//   ?demo=1        — фейковый каталог приложений/файлов (реальные иконки без Tauri недоступны)
+//   ?q=<запрос>    — подставить запрос и отрисовать
+//   ?theme=light   — светлая тема
+//   ?lang=en       — язык интерфейса предпросмотра
+// В обычном запуске (без query) не задействован.
+const demo = new URLSearchParams(location.search);
+if (demo.get("demo") === "1") {
+  const A = (name: string, sub: string): Entry => ({ name, sub, kind: "app", icon: "app" });
+  APPS = [
+    A("Visual Studio Code", "Applications"), A("Figma", "Applications"),
+    A("Telegram", "Applications"), A("Spotify", "Applications"),
+    A("Photoshop", "Applications"), A("Steam", "Applications"),
+  ];
+  FILES = [
+    { name: "roadmap-q3.md", sub: "~/nexalix/docs", kind: "file", icon: "file" },
+    { name: "brand-tokens.json", sub: "~/nexalix/design", kind: "file", icon: "file" },
+  ];
+}
+if (demo.get("theme") === "light") document.body.classList.add("light");
+// Фирменный тёмный фон для промо-скриншотов (в Tauri окно прозрачное).
+if (demo.has("demo") || demo.has("q")) {
+  document.body.style.background = document.body.classList.contains("light")
+    ? "radial-gradient(ellipse 70% 60% at 30% 10%, rgba(0,152,234,0.10), transparent 55%), #EEF1F5"
+    : "radial-gradient(ellipse 70% 60% at 25% 8%, rgba(0,152,234,0.14), transparent 55%), radial-gradient(ellipse 60% 55% at 85% 95%, rgba(0,200,150,0.06), transparent 60%), #0A0C0F";
+  document.body.style.padding = "80px 96px";
+}
+const demoQ = demo.get("q") ?? "";
+const demoLang = demo.get("lang");
+
+if (demoQ) q.value = demoQ;
+if (demoLang || demoQ || demo.has("demo")) {
+  // Демо: применяем настройки синхронно (с опц. языком), без чтения из Tauri.
+  applySettings(demoLang ? { lang: demoLang } : {});
+} else {
+  invoke("get_settings").then(applySettings).catch(() => applySettings({}));
+}
+build(demoQ);
 q.focus();
-refreshCatalog();
+if (!demo.has("demo") && !demoQ) refreshCatalog();

@@ -20,7 +20,7 @@
         <circle cx="9" cy="9" r="2.3" fill="currentColor"/><circle cx="23" cy="11" r="2.3" fill="currentColor"/>
         <circle cx="13" cy="23" r="2.7" fill="var(--accent)"/>
       </svg>
-      <span class="word">nexalix</span><span class="prod">agora</span><span class="sep">·</span><span class="prod thin" data-i18n="title_settings">Settings</span>
+      <span class="word">nexalix</span><span class="app">agora</span><span class="sep">·</span><span class="prod thin" data-i18n="title_settings">Settings</span>
     </div>
     <div class="caption">
       <div class="cbtn" id="btnMin" title="Minimize">
@@ -104,7 +104,10 @@
           <div class="card">
             <div class="row">
               <div class="txt"><div class="nm" data-i18n="wx_city_nm">City</div><div class="ds" data-i18n="wx_city_ds">Used for a bare “weather” query. Empty — detect by IP.</div></div>
-              <div class="ctl"><input id="wxCity" class="tfield" data-i18n-ph="wx_city_ph" placeholder="e.g. Berlin" spellcheck="false" /></div>
+              <div class="ctl" style="position:relative;">
+                <input id="wxCity" class="tfield" data-i18n-ph="wx_city_ph" placeholder="e.g. Berlin" spellcheck="false" autocomplete="off" />
+                <div class="applist" id="wxCityList"></div>
+              </div>
             </div>
           </div>
         </div>

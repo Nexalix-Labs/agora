@@ -54,6 +54,13 @@ jobs:
           }
           Set-Content checksums.txt ($lines -join "`n")
           gh release upload $env:TAG checksums.txt --clobber
+          # Стабильно-именованная копия — для прямой ссылки
+          # releases/latest/download/nexalix-agora-setup.exe (не зависит от версии).
+          $setup = Get-ChildItem $dir -Filter "*_x64-setup.exe" | Select-Object -First 1
+          if ($setup) {
+            Copy-Item $setup.FullName "nexalix-agora-setup.exe"
+            gh release upload $env:TAG "nexalix-agora-setup.exe" --clobber
+          }
           $ver = $env:TAG.TrimStart("v")
           $notes = (git tag -l --format='%(contents)' $env:TAG | Out-String).Trim()
           if (-not $notes -or $notes -eq "") { $notes = "Nexalix Agora $ver" }

@@ -2,17 +2,20 @@
 # Переиспользуемо всей линейкой: -AppName задаёт слово в stacked-lockup.
 #   tools\make-installer-art.ps1                          # agora -> src-tauri\installer
 #   tools\make-installer-art.ps1 -AppName translate -OutDir ..\translate\src-tauri\installer
-# sidebar 164x314 (welcome/finish), header 150x57. 24bpp BMP — без альфы, как любит NSIS.
-# Рисуем в 4x и даунскейлим — текст и знак без лесенок.
+# Логические размеры MUI: sidebar 164x314 (welcome/finish), header 150x57.
+# Отдаём BMP в $Px раз больше — MUI (FitControl) ужимает под контрол, и на
+# HiDPI картинка остаётся чёткой вместо растянутой в мыло. 24bpp без альфы.
+# Рисуем в $SS-кратном размере и даунскейлим — без лесенок.
 param(
     [string]$AppName = "agora",
-    [string]$OutDir = (Join-Path $PSScriptRoot '..\src-tauri\installer')
+    [string]$OutDir = (Join-Path $PSScriptRoot '..\src-tauri\installer'),
+    [int]$Px = 3
 )
 
 Add-Type -AssemblyName System.Drawing
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-$SS = 4  # суперсэмплинг
+$SS = 8  # суперсэмплинг (относительно логического размера)
 $accent = [System.Drawing.Color]::FromArgb(0, 152, 234)
 $white  = [System.Drawing.Color]::FromArgb(245, 247, 250)
 
@@ -51,10 +54,10 @@ function Save-Downscaled($draw, $w, $h, $path) {
     & $draw $g
     $g.Dispose()
 
-    $out = New-Object System.Drawing.Bitmap($w, $h, [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+    $out = New-Object System.Drawing.Bitmap(($w * $Px), ($h * $Px), [System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
     $og = [System.Drawing.Graphics]::FromImage($out)
     $og.InterpolationMode = 'HighQualityBicubic'
-    $og.DrawImage($big, (New-Object System.Drawing.Rectangle(0, 0, $w, $h)))
+    $og.DrawImage($big, (New-Object System.Drawing.Rectangle(0, 0, ($w * $Px), ($h * $Px))))
     $og.Dispose(); $big.Dispose()
     $out.Save($path, [System.Drawing.Imaging.ImageFormat]::Bmp)
     $out.Dispose()

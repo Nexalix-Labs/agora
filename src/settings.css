@@ -38,6 +38,7 @@ body {
 }
 .title { display:flex; align-items:center; gap:9px; padding:0 16px; font-size:13px; font-weight:500; color:var(--muted); letter-spacing:-0.01em; }
 .title .word { color:var(--fg); }
+.title .app { color:var(--fg); }
 .title .prod { color:var(--muted); }
 .title .sep { color:var(--faint); }
 .title .thin { font-weight:400; }
@@ -168,9 +169,10 @@ body {
 .tfield:focus { border-color:var(--accent); }
 .tfield::placeholder { color:var(--faint); }
 
-/* app picker list (внутри редактора хоткеев) */
+/* picker list (города / приложения). position:fixed — не клипается
+   overflow:hidden родительской карточки; координаты ставит JS. */
 .applist {
-  position:absolute; top:calc(100% + 6px); left:0; right:0; z-index:60;
+  position:fixed; z-index:100; max-width:340px;
   background:var(--window); border:1px solid var(--border-2); border-radius:10px; padding:5px;
   max-height:240px; overflow-y:auto; display:none;
   box-shadow:0 0 0 1px rgba(0,0,0,0.35), 0 20px 50px -14px rgba(0,0,0,0.7);
@@ -180,11 +182,11 @@ body {
 .applist::-webkit-scrollbar-thumb { background:var(--border-2); border-radius:999px; border:2px solid var(--window); }
 .applist .ai {
   display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:7px; cursor:pointer;
-  font:500 13px 'Inter',sans-serif; color:var(--muted);
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  font:500 13px 'Inter',sans-serif; color:var(--muted); line-height:1.35;
 }
 .applist .ai:hover { background:var(--raise); color:var(--fg); }
 .applist .ai img { width:18px; height:18px; object-fit:contain; flex:0 0 auto; }
+.applist .ai span:last-child { min-width:0; overflow-wrap:anywhere; }
 .applist .ai .ph { width:18px; height:18px; flex:0 0 auto; border-radius:4px; background:var(--raise-2); border:1px solid var(--border); }
 
 /* buttons */

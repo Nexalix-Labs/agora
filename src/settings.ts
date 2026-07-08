@@ -18,6 +18,7 @@ interface Settings {
   autoupdate: boolean;
   channel: string;
   wxCity: string;
+  wxLoc: { lat: number; lon: number; city: string } | null;
   binds: Bind[];
   plugins: { calc: boolean; syscmd: boolean; web: boolean; files: boolean; crypto: boolean; weather: boolean };
 }
@@ -30,7 +31,7 @@ interface Bind {
 }
 const DEF: Settings = {
   lang: resolveLang(), hotkey: "Alt+Space", tray: true, theme: "dark", accent: "#0098EA",
-  density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable", wxCity: "",
+  density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable", wxCity: "", wxLoc: null,
   binds: [],
   plugins: { calc: true, syscmd: true, web: true, files: true, crypto: true, weather: true },
 };
@@ -122,9 +123,56 @@ function syncControls() {
   applyAccent();
 }
 
-$("#wxCity").addEventListener("change", () => {
-  S.wxCity = ($("#wxCity") as HTMLInputElement).value.trim();
+/* Город погоды: кастомный саджест через Open-Meteo geocoding —
+   в списке город + область + страна, выбор фиксирует координаты. */
+const wxInput = $("#wxCity") as HTMLInputElement;
+const wxList = $("#wxCityList");
+let wxSuggT: ReturnType<typeof setTimeout> | null = null;
+let wxPicked = false; // ввод после выбора сбрасывает координаты
+
+wxInput.addEventListener("input", () => {
+  wxPicked = false;
+  const qs = wxInput.value.trim();
+  if (wxSuggT) clearTimeout(wxSuggT);
+  if (qs.length < 2) { wxList.classList.remove("on"); return; }
+  wxSuggT = setTimeout(async () => {
+    try {
+      const j = await (await fetch(
+        "https://geocoding-api.open-meteo.com/v1/search?count=5&language=" + S.lang + "&name=" + encodeURIComponent(qs),
+      )).json();
+      const rs: { name: string; latitude: number; longitude: number; admin1?: string; country?: string }[] = j?.results ?? [];
+      wxList.innerHTML = "";
+      rs.forEach(r => {
+        const it = document.createElement("div");
+        it.className = "ai";
+        const detail = [r.admin1, r.country].filter(Boolean).join(", ");
+        it.innerHTML = "<span></span>";
+        it.querySelector("span")!.textContent = r.name + (detail ? " — " + detail : "");
+        it.addEventListener("click", () => {
+          S.wxCity = r.name;
+          S.wxLoc = { lat: r.latitude, lon: r.longitude, city: r.name };
+          wxInput.value = r.name;
+          wxPicked = true;
+          wxList.classList.remove("on");
+          saveQuiet();
+        });
+        wxList.appendChild(it);
+      });
+      if (rs.length) { positionList(wxInput, wxList); wxList.classList.add("on"); }
+      else wxList.classList.remove("on");
+    } catch { /* сеть — саджеста нет, ручной ввод работает */ }
+  }, 300);
+});
+wxInput.addEventListener("change", () => {
+  if (wxPicked) return; // уже сохранили с координатами
+  S.wxCity = wxInput.value.trim();
+  S.wxLoc = null; // ручной текст — координаты определит лаунчер по имени
   saveQuiet();
+});
+document.addEventListener("click", e => {
+  if (!(e.target as HTMLElement).closest("#wxCityList") && e.target !== wxInput) {
+    wxList.classList.remove("on");
+  }
 });
 
 $$(".switch[data-key]").forEach(sw => {
@@ -210,7 +258,11 @@ document.addEventListener("click", e => {
   if (langDD.classList.contains("open") && !(e.target as HTMLElement).closest("#langDD")) closeDD();
 });
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeDD(); });
-$("#content").addEventListener("scroll", closeDD);
+$("#content").addEventListener("scroll", () => {
+  closeDD();
+  $("#wxCityList").classList.remove("on");
+  $("#bindAppList").classList.remove("on");
+});
 
 /* ============ AUTOSTART (плагин, вне settings.json) ============ */
 const swAuto = $("#swAutostart");
@@ -228,8 +280,11 @@ swAuto.addEventListener("click", async () => {
 });
 
 /* ============ HOTKEY RECORDER (общий: summon + свои бинды) ============ */
+// Храним в формате global-shortcut ("Alt+Shift+KeyE"), показываем по-людски ("E").
+const prettyKey = (k: string) =>
+  k.replace(/^Key([A-Z])$/, "$1").replace(/^Digit(\d)$/, "$1");
 function renderHk(el: HTMLElement, combo: string) {
-  el.innerHTML = combo.split("+").map(k => '<span class="kbd">' + k + '</span>').join("");
+  el.innerHTML = combo.split("+").map(k => '<span class="kbd">' + prettyKey(k) + '</span>').join("");
 }
 let recEl: HTMLElement | null = null;
 let recDone: ((combo: string | null) => void) | null = null;
@@ -247,10 +302,12 @@ function cancelRec() {
   el?.classList.remove("recording");
   d?.(null);
 }
-// e.key -> имя клавиши в формате global-shortcut ("Alt+Space", "Ctrl+Shift+K").
-function keyName(k: string): string | null {
+// Клавиша в формате global-shortcut. Буквы/цифры — из e.code (KeyE/Digit1):
+// парсер понимает только такие имена, плюс это не зависит от раскладки.
+function keyName(e: KeyboardEvent): string | null {
+  if (/^(Key[A-Z]|Digit\d)$/.test(e.code)) return e.code;
+  const k = e.key;
   if (k === " ") return "Space";
-  if (k.length === 1) return k.toUpperCase();
   if (/^F\d{1,2}$/.test(k)) return k;
   const map: Record<string, string> = {
     ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right",
@@ -272,7 +329,7 @@ document.addEventListener("keydown", e => {
     recEl.innerHTML = mods.map(m => '<span class="kbd">' + m + '</span>').join("") + '<span class="rec">…</span>';
     return;
   }
-  const k = keyName(e.key);
+  const k = keyName(e);
   if (!k || !mods.length) return; // глобальный хоткей без модификатора не даём
   const el = recEl, d = recDone;
   recEl = null; recDone = null;
@@ -324,6 +381,21 @@ function bindLabel(b: Bind): string {
   return b.label ?? b.target;
 }
 
+// Показывает fixed-список под якорем (или над, если снизу тесно). Высоту
+// меряем ПОСЛЕ показа — иначе при display:none она нулевая и флип уезжает.
+function positionList(anchor: HTMLElement, list: HTMLElement) {
+  const r = anchor.getBoundingClientRect();
+  // Прижат правым краём к полю, растёт влево — длинные названия помещаются.
+  list.style.left = "auto";
+  list.style.right = (window.innerWidth - r.right) + "px";
+  list.style.minWidth = r.width + "px";
+  list.style.top = "0px";
+  list.classList.add("on");
+  const h = list.offsetHeight; // уже ограничен max-height:240
+  const below = window.innerHeight - r.bottom - 10;
+  list.style.top = (below >= h ? r.bottom + 6 : Math.max(8, r.top - h - 6)) + "px";
+}
+
 function renderBinds() {
   const list = $("#bindList");
   list.innerHTML = "";
@@ -337,7 +409,7 @@ function renderBinds() {
   S.binds.forEach((b, i) => {
     const row = document.createElement("div");
     row.className = "row";
-    const kbds = b.hotkey.split("+").map(k => '<span class="kbd">' + k + '</span>').join("");
+    const kbds = b.hotkey.split("+").map(k => '<span class="kbd">' + prettyKey(k) + '</span>').join("");
     row.innerHTML =
       '<div class="txt"><div class="nm"></div><div class="ds"></div></div>' +
       '<div class="ctl" style="display:flex; align-items:center; gap:10px;">' +
@@ -426,7 +498,8 @@ bindTarget.addEventListener("input", async () => {
     });
     bindAppList.appendChild(it);
   });
-  bindAppList.classList.toggle("on", hits.length > 0);
+  if (hits.length) { positionList(bindTarget, bindAppList); bindAppList.classList.add("on"); }
+  else bindAppList.classList.remove("on");
 });
 document.addEventListener("click", e => {
   if (!(e.target as HTMLElement).closest("#bindAppList") && e.target !== bindTarget) {
@@ -546,4 +619,15 @@ function renderPlugins() {
   $("#sideVer").textContent = "v" + version;
   syncControls();
   applyI18n();
+
+  // Демо для промо-скриншотов (headless): ?pane=hotkeys открывает вкладку,
+  // ?lang=ru переключает язык предпросмотра. В Tauri не задействовано.
+  const demo = new URLSearchParams(location.search);
+  const pane = demo.get("pane");
+  if (pane) {
+    $$(".navitem").forEach(n => n.classList.toggle("active", n.dataset.pane === pane));
+    $$(".pane").forEach(p => p.classList.toggle("active", p.dataset.pane === pane));
+  }
+  const lang = demo.get("lang");
+  if (lang) { S.lang = lang; applyI18n(); syncControls(); }
 })();
