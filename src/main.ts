@@ -243,8 +243,6 @@ const WX_WORDS = new Set([
 ]);
 interface WxLoc { lat: number; lon: number; city: string }
 interface WxData { temp: number; code: number; wind: number; tmax: number; tmin: number }
-let ipLoc: WxLoc | null = null;
-let ipLocBusy = false;
 const geoCache = new Map<string, WxLoc | null>();
 const geoBusy = new Set<string>();
 const wxCache = new Map<string, { t: number; d: WxData }>();
@@ -265,18 +263,6 @@ function wxCond(code: number): string {
   return t(SET.lang, k as Parameters<typeof t>[1]);
 }
 const deg = (v: number) => (v > 0 ? "+" : "") + Math.round(v) + "°";
-
-async function fetchIpLoc() {
-  ipLocBusy = true;
-  try {
-    const j = await (await fetch("https://ipwho.is/")).json();
-    if (j?.success && j.latitude) {
-      ipLoc = { lat: j.latitude, lon: j.longitude, city: j.city ?? "" };
-      build(q.value);
-    }
-  } catch { /* оффлайн */ }
-  finally { ipLocBusy = false; }
-}
 
 async function fetchGeo(city: string) {
   geoBusy.add(city);
@@ -318,21 +304,20 @@ async function fetchWx(loc: WxLoc) {
 function tryWeather(query: string): Entry | null {
   const parts = query.trim().toLowerCase().split(/\s+/);
   if (!parts.length || !WX_WORDS.has(parts[0])) return null;
+  // Только явный город: из запроса или из настроек. Никакого гео по IP —
+  // ничего не звоним без запроса пользователя.
   const cityQ = parts.slice(1).join(" ") || SET.wxCity.trim().toLowerCase();
+  if (!cityQ) {
+    return { name: t(SET.lang, "wx_nocity"), sub: "Open-Meteo", kind: "action", icon: "sun", actionId: "settings" };
+  }
 
   // 1) локация
-  let loc: WxLoc | null = null;
-  if (cityQ) {
-    if (!geoCache.has(cityQ)) {
-      if (wxT) clearTimeout(wxT);
-      wxT = setTimeout(() => { if (!geoBusy.has(cityQ)) fetchGeo(cityQ); }, 350);
-    }
-    loc = geoCache.get(cityQ) ?? null;
-    if (geoCache.has(cityQ) && !loc) return null; // город не нашёлся
-  } else {
-    if (!ipLoc && !ipLocBusy) fetchIpLoc();
-    loc = ipLoc;
+  if (!geoCache.has(cityQ)) {
+    if (wxT) clearTimeout(wxT);
+    wxT = setTimeout(() => { if (!geoBusy.has(cityQ)) fetchGeo(cityQ); }, 350);
   }
+  const loc = geoCache.get(cityQ) ?? null;
+  if (geoCache.has(cityQ) && !loc) return null; // город не нашёлся
   const pending: Entry = { name: "…", sub: "Open-Meteo", kind: "answer", icon: "sun", answer: true, value: 0, display: "…" };
   if (!loc) return pending;
 
