@@ -64,7 +64,7 @@ fn enum_apps_folder() -> windows::core::Result<Vec<Entry>> {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Shell::{
-        SHCreateItemFromParsingName, BHID_EnumItems, IEnumShellItems, IShellItem,
+        BHID_EnumItems, IEnumShellItems, IShellItem, SHCreateItemFromParsingName,
         SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING,
     };
 
@@ -124,7 +124,9 @@ fn index_apps() -> Vec<Entry> {
 /// Недавние файлы из %APPDATA%\Microsoft\Windows\Recent (свежие сверху).
 #[tauri::command]
 fn recent_files() -> Vec<Entry> {
-    let Ok(a) = std::env::var("APPDATA") else { return Vec::new() };
+    let Ok(a) = std::env::var("APPDATA") else {
+        return Vec::new();
+    };
     let dir = PathBuf::from(a).join(r"Microsoft\Windows\Recent");
     let mut v: Vec<(std::time::SystemTime, Entry)> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&dir) {
@@ -133,8 +135,7 @@ fn recent_files() -> Vec<Entry> {
             let is_lnk = p
                 .extension()
                 .and_then(|x| x.to_str())
-                .map(|x| x.eq_ignore_ascii_case("lnk"))
-                .unwrap_or(false);
+                .is_some_and(|x| x.eq_ignore_ascii_case("lnk"));
             if !is_lnk {
                 continue;
             }
@@ -150,7 +151,15 @@ fn recent_files() -> Vec<Entry> {
                 .metadata()
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::UNIX_EPOCH);
-            v.push((t, Entry { name, sub: "Recent".into(), path: p.to_string_lossy().into_owned(), keywords: String::new() }));
+            v.push((
+                t,
+                Entry {
+                    name,
+                    sub: "Recent".into(),
+                    path: p.to_string_lossy().into_owned(),
+                    keywords: String::new(),
+                },
+            ));
         }
     }
     v.sort_by(|a, b| b.0.cmp(&a.0));
@@ -166,7 +175,16 @@ fn shell_open(target: &str) -> Result<(), String> {
 
     let op = HSTRING::from("open");
     let file = HSTRING::from(target);
-    let h = unsafe { ShellExecuteW(None, &op, &file, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+    let h = unsafe {
+        ShellExecuteW(
+            None,
+            &op,
+            &file,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
     if h.0 as usize > 32 {
         Ok(())
     } else {
@@ -249,7 +267,7 @@ fn extract_icon_datauri(path: &str) -> Option<String> {
     use windows::Win32::Foundation::SIZE;
     use windows::Win32::Graphics::Gdi::{DeleteObject, HGDIOBJ};
     use windows::Win32::UI::Shell::{
-        SHCreateItemFromParsingName, IShellItem, IShellItemImageFactory, SIIGBF_BIGGERSIZEOK,
+        IShellItem, IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK,
         SIIGBF_ICONONLY,
     };
 
@@ -334,7 +352,8 @@ unsafe fn hbitmap_to_rgba(
             any_alpha = true;
         }
         if a != 0 && a != 255 {
-            let un = |c: u8| ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8;
+            let av = u32::from(a);
+            let un = |c: u8| ((u32::from(c) * 255 + av / 2) / av).min(255) as u8;
             px[0] = un(r);
             px[1] = un(g);
             px[2] = un(b);
@@ -397,14 +416,22 @@ fn run_action(app: AppHandle, id: String) -> Result<String, String> {
             use windows::Win32::System::Power::SetSuspendState;
             // bHibernate=false → сон, не гибернация
             let ok = unsafe { SetSuspendState(false, false, false) };
-            if ok.as_bool() { Ok("Sleeping…".into()) } else { Err("Не удалось перейти в сон".into()) }
+            if ok.as_bool() {
+                Ok("Sleeping…".into())
+            } else {
+                Err("Не удалось перейти в сон".into())
+            }
         }
         "empty_trash" => {
             use windows::core::PCWSTR;
             use windows::Win32::UI::Shell::SHEmptyRecycleBinW;
             // NOCONFIRMATION | NOPROGRESSUI | NOSOUND; ошибка = корзина уже пуста
             let hr = unsafe { SHEmptyRecycleBinW(None, PCWSTR::null(), 0x7) };
-            if hr.is_ok() { Ok("Trash emptied".into()) } else { Ok("Trash is already empty".into()) }
+            if hr.is_ok() {
+                Ok("Trash emptied".into())
+            } else {
+                Ok("Trash is already empty".into())
+            }
         }
         "dark_mode" => {
             use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
@@ -416,11 +443,18 @@ fn run_action(app: AppHandle, id: String) -> Result<String, String> {
                 )
                 .map_err(|e| e.to_string())?;
             let cur: u32 = key.get_value("AppsUseLightTheme").unwrap_or(1);
-            let new: u32 = if cur == 0 { 1 } else { 0 };
-            key.set_value("AppsUseLightTheme", &new).map_err(|e| e.to_string())?;
-            key.set_value("SystemUsesLightTheme", &new).map_err(|e| e.to_string())?;
+            let new: u32 = u32::from(cur == 0);
+            key.set_value("AppsUseLightTheme", &new)
+                .map_err(|e| e.to_string())?;
+            key.set_value("SystemUsesLightTheme", &new)
+                .map_err(|e| e.to_string())?;
             broadcast_theme_change();
-            Ok(if new == 0 { "Dark mode on" } else { "Dark mode off" }.into())
+            Ok(if new == 0 {
+                "Dark mode on"
+            } else {
+                "Dark mode off"
+            }
+            .into())
         }
         _ => Err(format!("unknown action: {id}")),
     }
@@ -464,7 +498,10 @@ const DEFAULT_HOTKEY: &str = "Alt+Space";
 struct SettingsState(Mutex<serde_json::Value>);
 
 fn settings_file(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_config_dir().ok().map(|d| d.join("settings.json"))
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join("settings.json"))
 }
 
 fn read_settings_file(app: &AppHandle) -> serde_json::Value {
@@ -492,7 +529,10 @@ fn set_settings(
     #[cfg(desktop)]
     {
         apply_hotkeys(&app, &value)?;
-        let tray_on = value.get("tray").and_then(|v| v.as_bool()).unwrap_or(true);
+        let tray_on = value
+            .get("tray")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
         let lang = value.get("lang").and_then(|v| v.as_str()).unwrap_or("en");
         if let Some(tray) = app.tray_by_id("main-tray") {
             let _ = tray.set_visible(tray_on);
@@ -588,7 +628,7 @@ fn position_spotlight(w: &tauri::WebviewWindow) {
         let mpos = mon.position();
         let msize = mon.size();
         let x = mpos.x + (msize.width.saturating_sub(size.width) / 2) as i32;
-        let y = mpos.y + (msize.height as f64 * 0.16) as i32;
+        let y = mpos.y + (f64::from(msize.height) * 0.16) as i32;
         let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
     } else {
         let _ = w.center();
@@ -622,13 +662,28 @@ fn show_window(app: &AppHandle) {
 fn tray_labels(lang: &str) -> [&'static str; 4] {
     match lang {
         "ru" => ["Открыть", "Настройки…", "Запускать при входе", "Выход"],
-        "uk" => ["Відкрити", "Налаштування…", "Запускати під час входу", "Вийти"],
-        "de" => ["Öffnen", "Einstellungen…", "Bei Anmeldung starten", "Beenden"],
+        "uk" => [
+            "Відкрити",
+            "Налаштування…",
+            "Запускати під час входу",
+            "Вийти",
+        ],
+        "de" => [
+            "Öffnen",
+            "Einstellungen…",
+            "Bei Anmeldung starten",
+            "Beenden",
+        ],
         "es" => ["Abrir", "Ajustes…", "Abrir al iniciar sesión", "Salir"],
         "fr" => ["Ouvrir", "Réglages…", "Lancer à la connexion", "Quitter"],
         "it" => ["Apri", "Impostazioni…", "Avvia all'accesso", "Esci"],
         "pt" => ["Abrir", "Configurações…", "Iniciar ao entrar", "Sair"],
-        "pl" => ["Otwórz", "Ustawienia…", "Uruchamiaj przy logowaniu", "Zakończ"],
+        "pl" => [
+            "Otwórz",
+            "Ustawienia…",
+            "Uruchamiaj przy logowaniu",
+            "Zakończ",
+        ],
         "tr" => ["Aç", "Ayarlar…", "Oturum açılınca başlat", "Çıkış"],
         "zh" => ["打开", "设置…", "登录时启动", "退出"],
         "ja" => ["開く", "設定…", "ログイン時に起動", "終了"],
@@ -651,7 +706,8 @@ fn build_tray_menu(app: &AppHandle, lang: &str) -> tauri::Result<tauri::menu::Me
     let open_i = MenuItem::with_id(app, "open", l[0], true, None::<&str>)?;
     let settings_i = MenuItem::with_id(app, "settings", l[1], true, None::<&str>)?;
     let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
-    let autostart_i = CheckMenuItem::with_id(app, "autostart", l[2], true, autostart_on, None::<&str>)?;
+    let autostart_i =
+        CheckMenuItem::with_id(app, "autostart", l[2], true, autostart_on, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit_i = MenuItem::with_id(app, "quit", l[3], true, None::<&str>)?;
     Menu::with_items(app, &[&open_i, &settings_i, &autostart_i, &sep, &quit_i])
@@ -698,7 +754,10 @@ fn build_tray(app: &AppHandle, lang: &str) -> tauri::Result<()> {
     Ok(())
 }
 
+// Точка входа: паника при инициализации Tauri — невосстановимый баг старта,
+// а не рантайм-путь. expect здесь оправдан.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[allow(clippy::expect_used, clippy::missing_panics_doc)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -722,12 +781,16 @@ pub fn run() {
         .setup(|app| {
             #[cfg(desktop)]
             {
+                use tauri_plugin_autostart::ManagerExt;
                 app.handle()
                     .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
 
                 // Настройки: файл -> state; хоткеи из настроек (fallback Alt+Space).
                 let initial = read_settings_file(app.handle());
-                let tray_enabled = initial.get("tray").and_then(|v| v.as_bool()).unwrap_or(true);
+                let tray_enabled = initial
+                    .get("tray")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true);
                 let lang = initial
                     .get("lang")
                     .and_then(|v| v.as_str())
@@ -735,7 +798,7 @@ pub fn run() {
                     .to_string();
                 let autoupdate = initial
                     .get("autoupdate")
-                    .and_then(|v| v.as_bool())
+                    .and_then(serde_json::Value::as_bool)
                     .unwrap_or(true);
 
                 if let Err(e) = apply_hotkeys(app.handle(), &initial) {
@@ -752,7 +815,9 @@ pub fn run() {
                     let handle = app.handle().clone();
                     tauri::async_runtime::spawn(async move {
                         use tauri_plugin_updater::UpdaterExt;
-                        let Ok(updater) = handle.updater() else { return };
+                        let Ok(updater) = handle.updater() else {
+                            return;
+                        };
                         if let Ok(Some(update)) = updater.check().await {
                             let _ = update.download_and_install(|_, _| {}, || {}).await;
                         }
@@ -760,7 +825,6 @@ pub fn run() {
                 }
 
                 // Автозапуск включаем по умолчанию только при первом запуске.
-                use tauri_plugin_autostart::ManagerExt;
                 if let Ok(dir) = app.path().app_config_dir() {
                     let marker = dir.join(".autostart-initialized");
                     if !marker.exists() {

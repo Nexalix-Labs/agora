@@ -41,3 +41,23 @@ opt-level = "s"
 lto = true
 strip = true
 panic = "abort"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Главное правило: никаких unwrap на рантайм-путях.
+unwrap_used = "deny"
+expect_used = "warn"
+# Win32/COM/GDI FFI: приведения указателей и usize<->i32/u32 и raw-borrow —
+# природа windows-rs API, не наш «грязный» код.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+ptr_as_ptr = "allow"
+borrow_as_ptr = "allow"
+ref_as_ptr = "allow"
+many_single_char_names = "allow"
+# Русскоязычные докблоки с латинскими API-терминами (AppID, RPC_E_CHANGED_MODE).
+doc_markdown = "allow"
+# Tauri #[command]-хендлеры принимают owned-аргументы (десериализация invoke).
+needless_pass_by_value = "allow"
