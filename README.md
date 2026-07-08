@@ -26,7 +26,7 @@
 - **Applications** — searches everything Windows Search sees (`shell:AppsFolder`): Win32 and Store/UWP apps, with their real icons. Localized names match latin input too (`терминал` ⇄ `terminal`).
 - **Recent files** — your latest documents and folders, straight from Windows Recent.
 - **Calculator** — type `48 * 12` or `59,7 + 2` and copy the answer with <kbd>Enter</kbd>. Comma decimals welcome.
-- **Crypto rates** — type `btc`, `ton` or `0.5 eth` for a live price (USD + RUB, CoinGecko), <kbd>Enter</kbd> copies it.
+- **Crypto rates** — type any coin ticker (`btc`, `gram`, `0.5 eth`) for a live price (USD + RUB). Resolved dynamically via CoinGecko — new and renamed coins just work, <kbd>Enter</kbd> copies.
 - **System actions** — sleep, lock, toggle dark mode, empty trash.
 - **Web fallback** — nothing matched? One row to search the web.
 - **Settings window** — hotkey recorder, dark / light / system theme, five accent colors, row density, blur, plugin toggles.

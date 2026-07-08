@@ -140,23 +140,39 @@ function tryCalc(query: string): Entry | null {
 }
 
 /* ============================ CRYPTO RATES ============================ */
-// Тикер или "0.5 eth" -> живая цена (CoinGecko, без ключа). Кэш 30с,
-// повторные перерисовки при вводе не дёргают сеть.
-const COINS: Record<string, { id: string; sym: string }> = {
-  btc: { id: "bitcoin", sym: "BTC" },       eth: { id: "ethereum", sym: "ETH" },
-  ton: { id: "the-open-network", sym: "TON" }, sol: { id: "solana", sym: "SOL" },
-  usdt: { id: "tether", sym: "USDT" },      usdc: { id: "usd-coin", sym: "USDC" },
-  bnb: { id: "binancecoin", sym: "BNB" },   xrp: { id: "ripple", sym: "XRP" },
-  doge: { id: "dogecoin", sym: "DOGE" },    ada: { id: "cardano", sym: "ADA" },
-  trx: { id: "tron", sym: "TRX" },          not: { id: "notcoin", sym: "NOT" },
-  ltc: { id: "litecoin", sym: "LTC" },      dot: { id: "polkadot", sym: "DOT" },
-  avax: { id: "avalanche-2", sym: "AVAX" }, link: { id: "chainlink", sym: "LINK" },
-};
+// Без хардкода: тикер резолвится через CoinGecko /search — есть такая монета
+// (включая новые и переименованные) -> тянется цена, нет -> строки нет.
+// symCache: слово -> монета | null («проверяли, не монета») — на всю сессию,
+// чтобы обычные слова-запросы не дёргали API повторно. Резолв с дебаунсом.
+interface Coin { id: string; sym: string; name: string }
+const symCache = new Map<string, Coin | null>();
+const resolving = new Set<string>();
+let resolveT: ReturnType<typeof setTimeout> | null = null;
+
 const priceCache = new Map<string, { usd: number; rub: number; t: number }>();
 const priceInFlight = new Set<string>();
 
 const fmtMoney = (v: number) =>
   v.toLocaleString("en-US", { maximumFractionDigits: v < 1 ? 6 : 2 });
+
+async function resolveSymbol(word: string) {
+  if (resolving.has(word)) return;
+  resolving.add(word);
+  try {
+    const r = await fetch("https://api.coingecko.com/api/v3/search?query=" + encodeURIComponent(word));
+    const j = await r.json();
+    const coins: { id: string; symbol?: string; name?: string; market_cap_rank?: number }[] = j?.coins ?? [];
+    const rank = (c: { market_cap_rank?: number }) => c.market_cap_rank ?? 1e9;
+    const pick = (arr: typeof coins) => arr.sort((a, b) => rank(a) - rank(b))[0];
+    // точное совпадение тикера приоритетнее, затем точное имя (напр. "bitcoin")
+    const hit =
+      pick(coins.filter(c => (c.symbol ?? "").toLowerCase() === word)) ??
+      pick(coins.filter(c => (c.name ?? "").toLowerCase() === word));
+    symCache.set(word, hit ? { id: hit.id, sym: (hit.symbol ?? word).toUpperCase(), name: hit.name ?? "" } : null);
+    if (hit) build(q.value);
+  } catch { /* сеть/лимит — не кэшируем отрицательно, попробуем ещё раз */ }
+  finally { resolving.delete(word); }
+}
 
 async function fetchPrice(id: string) {
   priceInFlight.add(id);
@@ -174,24 +190,42 @@ async function fetchPrice(id: string) {
   finally { priceInFlight.delete(id); }
 }
 
+function parseCrypto(query: string): { amount: number; word: string; hasAmount: boolean } | null {
+  const s = query.trim().toLowerCase();
+  let m = s.match(/^(\d+(?:[.,]\d+)?)\s+([a-z0-9]{2,10})$/);
+  if (m) return { amount: parseFloat(m[1].replace(",", ".")), word: m[2], hasAmount: true };
+  m = s.match(/^(?=.*[a-z])([a-z0-9]{2,10})$/);
+  if (m) return { amount: 1, word: m[1], hasAmount: false };
+  return null;
+}
+
 function tryCrypto(query: string): Entry | null {
-  const m = query.trim().toLowerCase().match(/^(\d+(?:[.,]\d+)?)?\s*([a-z]{2,5})$/);
-  if (!m) return null;
-  const coin = COINS[m[2]];
+  const p0 = parseCrypto(query);
+  if (!p0 || !isFinite(p0.amount)) return null;
+  const { word, amount, hasAmount } = p0;
+
+  if (!symCache.has(word)) {
+    // Незнакомое слово — резолвим после паузы ввода, строку пока не показываем.
+    if (resolveT) clearTimeout(resolveT);
+    resolveT = setTimeout(() => {
+      if (parseCrypto(q.value)?.word === word) resolveSymbol(word);
+    }, 350);
+    return null;
+  }
+  const coin = symCache.get(word);
   if (!coin) return null;
-  const amount = m[1] ? parseFloat(m[1].replace(",", ".")) : 1;
-  if (!isFinite(amount)) return null;
+
   const p = priceCache.get(coin.id);
   const stale = !p || Date.now() - p.t > 30_000;
   if (stale && !priceInFlight.has(coin.id)) fetchPrice(coin.id);
-  const label = (m[1] ? amount + " " : "") + coin.sym;
+  const label = (hasAmount ? amount + " " : "") + coin.sym;
   if (!p) {
-    return { name: label, sub: "CoinGecko", kind: "answer", icon: "coin", answer: true, value: 0, display: "…" };
+    return { name: label, sub: coin.name + " · CoinGecko", kind: "answer", icon: "coin", answer: true, value: 0, display: "…" };
   }
   const usd = amount * p.usd;
   return {
     name: label,
-    sub: "≈ " + fmtMoney(amount * p.rub) + " RUB · CoinGecko",
+    sub: coin.name + " · ≈ " + fmtMoney(amount * p.rub) + " RUB · CoinGecko",
     kind: "answer", icon: "coin", answer: true,
     value: usd, display: "$" + fmtMoney(usd),
   };
@@ -403,6 +437,12 @@ q.addEventListener("keydown", (e) => {
   }
 });
 document.addEventListener("click", () => q.focus());
+
+// Автофокус по наведению: навёл мышь на панель — печатай сразу, клик не нужен.
+launcher.addEventListener("mouseenter", () => {
+  if (!document.hasFocus()) appWin?.setFocus().catch(() => {});
+  q.focus();
+});
 
 // Окно показано по хоткею — фокус, выделение, свежий каталог.
 listen("focus-input", () => {
