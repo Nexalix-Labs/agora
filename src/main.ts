@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { RTL, t, resolveLang } from "./i18n";
 import { ENGINES, engineById, engineByPrefix, engineUrl, type Engine } from "./engines";
+import { convertUnits, fmtNum, parseIntLiteral, toBase, CURRENCIES, type UnitResult } from "./units";
 
 /* ============================ TYPES ============================ */
 interface Entry {
@@ -19,6 +20,7 @@ interface Entry {
   value?: number;
   display?: string;
   copyText?: string;   // что копировать по Enter (по умолчанию value)
+  pid?: number;        // для kind "proc" — какой процесс завершать
 }
 
 interface Settings {
@@ -35,13 +37,13 @@ interface Settings {
   wxCity: string;
   wxLoc: { lat: number; lon: number; city: string } | null;
   webEngine: string;   // движок по умолчанию для веб-поиска
-  plugins: { calc: boolean; syscmd: boolean; web: boolean; crypto: boolean; weather: boolean };
+  plugins: { calc: boolean; syscmd: boolean; web: boolean; crypto: boolean; weather: boolean; convert: boolean; clipboard: boolean; kill: boolean };
 }
 const DEF: Settings = {
   lang: resolveLang(), hotkey: "Alt+Space", tray: true, theme: "dark", accent: "#0098EA",
   density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable", wxCity: "", wxLoc: null,
   webEngine: "google",
-  plugins: { calc: true, syscmd: true, web: true, crypto: true, weather: true },
+  plugins: { calc: true, syscmd: true, web: true, crypto: true, weather: true, convert: true, clipboard: true, kill: true },
 };
 let SET: Settings = { ...DEF, plugins: { ...DEF.plugins } };
 
@@ -66,11 +68,14 @@ const I = {
   gear:   S('<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>'),
   coin:   S('<circle cx="12" cy="12" r="9"/><path d="M14.8 9.2c-.5-.8-1.5-1.4-2.8-1.4-1.7 0-2.8.9-2.8 2.1 0 2.8 5.8 1.4 5.8 4.2 0 1.2-1.1 2.1-3 2.1-1.4 0-2.5-.6-3-1.5M12 5.8v1.9M12 16.3v1.9"/>'),
   sun:    S('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
+  clip:   S('<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>'),
+  proc:   S('<rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>'),
 };
 
 /* ============================ CATALOG ============================ */
 let APPS: Entry[] = [];
 let FILES: Entry[] = [];
+let CLIPS: string[] = []; // история буфера обмена (обновляется при показе)
 
 // Системные действия. name/sub локализуются; kw — мультиязычные поисковые
 // алиасы (латиница + кириллица), чтобы находились на любом языке интерфейса.
@@ -111,6 +116,10 @@ async function refreshCatalog() {
   } catch (e) {
     console.error("catalog:", e);
   }
+  // История буфера — отдельно: её отсутствие не должно ронять каталог.
+  if (SET.plugins.clipboard) {
+    try { CLIPS = await invoke<string[]>("clipboard_history"); } catch { CLIPS = []; }
+  } else CLIPS = [];
   build(q.value);
 }
 
@@ -299,6 +308,140 @@ function tryCrypto(query: string): Entry | null {
   };
 }
 
+/* ============================ CONVERT ============================ */
+// Единицы/температура/системы счисления — чистые функции units.ts (оффлайн).
+// Валюты — живой курс через exchangerate-api (без ключа), база USD, кэш 1 ч.
+// Грамматика: «100 usd to eur», «10 km in mi», «72f to c», «255 to hex»,
+// «0xFF» (одиночный литерал), «unix now», «1700000000 as date».
+
+let fxRates: { t: number; rates: Record<string, number> } | null = null;
+let fxBusy = false;
+
+async function fetchRates() {
+  fxBusy = true;
+  try {
+    const j = await (await fetch("https://open.er-api.com/v6/latest/USD")).json();
+    if (j?.rates && typeof j.rates === "object") {
+      fxRates = { t: Date.now(), rates: j.rates };
+      build(q.value); // курс долетел — перерисуем, если запрос всё ещё валютный
+    }
+  } catch { /* сеть/лимит — оставим «…» или устаревший кэш */ }
+  finally { fxBusy = false; }
+}
+
+// Разбор числа: апострофы/пробелы — разделители тысяч; запятая — десятичная
+// (или тысячная в шаблоне 1,000). Возвращает NaN на мусор.
+function parseAmount(raw: string): number {
+  let s = raw.replace(/['\s]/g, "");
+  if (s.includes(",") && s.includes(".")) {
+    // правый разделитель — десятичный
+    if (s.lastIndexOf(",") > s.lastIndexOf(".")) s = s.replace(/\./g, "").replace(",", ".");
+    else s = s.replace(/,/g, "");
+  } else if (s.includes(",")) {
+    s = /^\d{1,3}(,\d{3})+$/.test(s) ? s.replace(/,/g, "") : s.replace(",", ".");
+  }
+  return parseFloat(s);
+}
+
+// Число (в т.ч. «.5», «-5») + единица (буквы/символы с опц. хвостовой цифрой:
+// m2, km2, m3) + связка + единица. Цифра в единице обязательна для площади/объёма;
+// число «жадное» по цифрам, поэтому «100 usd» не недобирает до «1»+«00usd».
+const CONV_CONN = /^\s*(-?(?:\d[\d.,']*|[.,]\d+))\s*([a-z°"'/]+[0-9]?)\s+(?:to|into|in|as|→|>)\s+([a-z°"'/]+[0-9]?)\s*$/i;
+
+function currencyEntry(amount: number, from: string, to: string): Entry {
+  const F = from.toUpperCase(), T = to.toUpperCase();
+  const stale = !fxRates || Date.now() - fxRates.t > 3_600_000;
+  if (stale && !fxBusy) fetchRates();
+  const base: Entry = {
+    name: fmtNum(amount) + " " + F, sub: T + " · exchangerate-api",
+    kind: "answer", icon: "coin", answer: true, eq: true, value: 0, display: "…",
+  };
+  if (!fxRates) return base;
+  const rf = fxRates.rates[F], rt = fxRates.rates[T];
+  if (rf == null || rt == null) return base; // курс есть, кода нет — просто ждём/пусто
+  const out = (amount * rt) / rf;
+  return { ...base, value: out, display: fmtNum(out) + " " + T, copyText: fmtNum(out) };
+}
+
+function catSub(r: UnitResult): string {
+  return t(SET.lang, ("conv_" + r.cat) as Parameters<typeof t>[1]);
+}
+
+function tryConvert(query: string): Entry | null {
+  const m = query.match(CONV_CONN);
+  if (!m) return null;
+  const amount = parseAmount(m[1]);
+  if (!isFinite(amount)) return null;
+  const from = m[2].trim().replace(/\s+/g, "").toLowerCase();
+  const to = m[3].trim().replace(/\s+/g, "").toLowerCase();
+
+  if (CURRENCIES.has(from) && CURRENCIES.has(to)) return currencyEntry(amount, from, to);
+
+  const r = convertUnits(amount, from, to);
+  if (!r) return null;
+  return {
+    name: fmtNum(amount) + " " + m[2].trim(), sub: catSub(r),
+    kind: "answer", icon: "calc", answer: true, eq: true,
+    value: r.n, display: fmtNum(r.n) + " " + r.unit, copyText: fmtNum(r.n),
+  };
+}
+
+// Системы счисления: «255 to hex», «0b1010 to dec», одиночный «0xFF» -> dec.
+const BASE_TO = /^(0x[0-9a-f]+|0b[01]+|0o[0-7]+|-?\d+)\s+(?:to|into|in|as)\s+(hex|hexadecimal|bin|binary|oct|octal|dec|decimal)$/i;
+const BASE_LONE = /^(0x[0-9a-f]+|0b[01]+|0o[0-7]+)$/i;
+
+function tryBase(query: string): Entry | null {
+  const s = query.trim().toLowerCase();
+  const mk = (name: string, display: string, sub: string): Entry => ({
+    name, sub, kind: "answer", icon: "calc", answer: true, eq: true, value: 0, display, copyText: display,
+  });
+
+  const m = s.match(BASE_TO);
+  if (m) {
+    const v = parseIntLiteral(m[1]);
+    if (v == null) return null;
+    const tgt = m[2].startsWith("hex") ? "hex" : m[2].startsWith("bin") ? "bin" : m[2].startsWith("oct") ? "oct" : "dec";
+    return mk(query.trim(), toBase(v, tgt), t(SET.lang, "conv_base"));
+  }
+  if (BASE_LONE.test(s)) {
+    const v = parseIntLiteral(s);
+    if (v == null) return null;
+    const sub = "hex " + toBase(v, "hex") + " · oct " + toBase(v, "oct") + " · bin " + toBase(v, "bin");
+    return mk(query.trim(), toBase(v, "dec"), sub);
+  }
+  return null;
+}
+
+// Timestamp: «unix now»/«epoch»/«timestamp» -> текущий; «<epoch> as date» -> дата.
+const TS_NOW = /^(?:unix|epoch|timestamp)(?:\s+now)?$/i;
+const TS_AS_DATE = /^(\d{9,13})\s+(?:as|to|in)\s+(?:date|time|iso|utc)$/i;
+
+function tryTime(query: string): Entry | null {
+  const s = query.trim().toLowerCase();
+  if (TS_NOW.test(s)) {
+    const ms = Date.now();
+    const sec = Math.floor(ms / 1000);
+    return {
+      name: query.trim(), sub: new Date(ms).toISOString(),
+      kind: "answer", icon: "calc", answer: true, eq: true,
+      value: sec, display: String(sec), copyText: String(sec),
+    };
+  }
+  const m = s.match(TS_AS_DATE);
+  if (m) {
+    const num = parseInt(m[1], 10);
+    const ms = m[1].length >= 12 ? num : num * 1000; // >=12 цифр — миллисекунды
+    const d = new Date(ms);
+    if (isNaN(d.getTime())) return null;
+    return {
+      name: query.trim(), sub: "UTC " + d.toISOString(),
+      kind: "answer", icon: "calc", answer: true, eq: true,
+      value: 0, display: d.toLocaleString(), copyText: d.toISOString(),
+    };
+  }
+  return null;
+}
+
 /* ============================ WEATHER ============================ */
 // «погода» / «weather berlin» на любом языке интерфейса. Open-Meteo без ключа.
 // Локация: город из запроса > город из настроек > IP. Кэш прогноза 10 мин.
@@ -460,20 +603,93 @@ function webEntry(e: Engine, text: string): Entry {
   };
 }
 
+/* ============================ CLIPBOARD ============================ */
+// Ключевое слово (clip/clipboard/буфер/история) -> список последних копий из
+// памяти Rust; хвост запроса фильтрует по содержимому. Enter кладёт выбранное
+// в буфер (дальше Ctrl+V). Пусто -> подсказка.
+// «board» убран как слишком общее слово; оставшиеся — явные триггеры буфера.
+const CLIP_KW = /^(?:clip|clips|clipboard|буфер|история)(?:\s+([\s\S]*))?$/i;
+
+function matchClip(query: string): string | null {
+  const m = query.match(CLIP_KW);
+  return m ? (m[1] ?? "").trim() : null;
+}
+
+function clipPreview(text: string): string {
+  const oneline = text.replace(/\s+/g, " ").trim();
+  return oneline.length > 84 ? oneline.slice(0, 84) + "…" : oneline;
+}
+
+// Строки истории только если сработало ключевое слово И есть совпадения. Пусто ->
+// [] => build() НЕ уходит в эксклюзивный режим, обычный поиск/веб-фолбэк работают.
+function clipMode(query: string): Entry[] {
+  const filter = matchClip(query);
+  if (filter === null) return [];
+  const f = filter.toLowerCase();
+  const hits = (f ? CLIPS.filter(c => c.toLowerCase().includes(f)) : CLIPS).slice(0, 12);
+  return hits.map(c => ({ name: clipPreview(c), sub: "", kind: "clip", icon: "clip", copyText: c }));
+}
+
+/* ============================ KILL (processes) ============================ */
+// Ключевое слово kill/убить -> список процессов из Rust; хвост фильтрует по имени.
+// Enter завершает выбранный (kind "proc"). Список тянется лениво и кэшируется 3с.
+interface ProcInfo { pid: number; name: string; mem: number }
+const KILL_KW = /^(?:kill|убить|завершить)(?:\s+([\s\S]*))?$/i;
+let PROCS: ProcInfo[] = [];
+let procsT = 0;
+let procsBusy = false;
+
+async function fetchProcs() {
+  procsBusy = true;
+  try { PROCS = await invoke<ProcInfo[]>("list_processes"); }
+  catch { PROCS = []; }
+  // procsT ставим и при ошибке — иначе build() в finally тут же зациклит рефетч.
+  finally { procsT = Date.now(); procsBusy = false; build(q.value); }
+}
+
+const fmtMem = (b: number): string =>
+  b >= 1 << 30 ? (b / (1 << 30)).toFixed(1) + " GB" : Math.max(1, Math.round(b / (1 << 20))) + " MB";
+
+function killMode(query: string): Entry[] {
+  const m = query.match(KILL_KW);
+  if (!m) return [];
+  const filter = (m[1] ?? "").trim().toLowerCase();
+  if (Date.now() - procsT > 3000 && !procsBusy) fetchProcs();
+  if (!PROCS.length) {
+    // грузим — держим режим строкой-плейсхолдером, чтобы не мигал веб-поиск
+    return procsBusy ? [{ name: "…", sub: "", kind: "prochint", icon: "proc" }] : [];
+  }
+  const list = filter ? PROCS.filter(p => p.name.toLowerCase().includes(filter)) : PROCS;
+  return list.slice(0, 14).map(p => ({
+    name: p.name, sub: "PID " + p.pid + (p.mem ? " · " + fmtMem(p.mem) : ""),
+    kind: "proc", icon: "proc", pid: p.pid,
+  }));
+}
+
 /* ============================ RENDER (flat, quiet) ============================ */
 function build(query: string) {
   const rows: Entry[] = [];
   const calc = SET.plugins.calc ? tryCalc(query) : null;
   if (calc) rows.push(calc);
-  const wx = !calc && SET.plugins.weather ? tryWeather(query) : null;
+  const conv = !calc && SET.plugins.convert ? (tryConvert(query) ?? tryBase(query) ?? tryTime(query)) : null;
+  if (conv) rows.push(conv);
+  const wx = !calc && !conv && SET.plugins.weather ? tryWeather(query) : null;
   if (wx) rows.push(...wx);
-  const crypto = !calc && !wx && SET.plugins.crypto ? tryCrypto(query) : null;
+  const crypto = !calc && !conv && !wx && SET.plugins.crypto ? tryCrypto(query) : null;
   if (crypto) rows.push(crypto);
 
+  const clip = SET.plugins.clipboard ? clipMode(query) : [];
+  const kill = SET.plugins.kill ? killMode(query) : [];
   if (!query.trim()) {
     // Пустой запрос — по умолчанию пустая панель, ничего не навязываем.
     // Недавние — только если включено в настройках (Show recent on open).
     if (SET.recent) rows.push(...FILES.slice(0, 6));
+  } else if (clip.length) {
+    // Режим истории буфера — эксклюзивный (только при реальных совпадениях).
+    rows.push(...clip);
+  } else if (kill.length) {
+    // Режим завершения процессов — эксклюзивный.
+    rows.push(...kill);
   } else {
     // Явный движок по префиксу: "g: …", "c: …", "gpt: …" — главный intent.
     const pe = SET.plugins.web ? matchEnginePrefix(query) : null;
@@ -492,7 +708,7 @@ function build(query: string) {
       .sort((a, b) => b.sc - a.sc)
       .slice(0, 14)
       .forEach(x => rows.push(x.o));
-    if (!calc && !wx && !crypto && !pe && SET.plugins.web) {
+    if (!calc && !conv && !wx && !crypto && !pe && SET.plugins.web) {
       rows.push(webEntry(engineById(SET.webEngine), query.trim()));
     }
   }
@@ -625,11 +841,32 @@ function toast(msg: string) {
 async function hideAndReset() {
   await appWin?.hide().catch(() => {});
   q.value = "";
+  histIdx = -1; // выход из режима истории: программная очистка не шлёт input
   build("");
 }
 
 async function run(o: Entry) {
   if (!o) return;
+  pushHist(q.value); // запомнить набранный запрос для листания ↑/↓
+  if (o.kind === "clip") {
+    // Кладём выбранную копию обратно в буфер, прячемся — дальше юзер жмёт Ctrl+V.
+    try { await invoke("set_clipboard", { text: o.copyText ?? "" }); } catch { /* нет доступа к буферу */ }
+    toast(t(SET.lang, "copied") + "  " + clipPreview(o.copyText ?? ""));
+    await hideAndReset();
+    return;
+  }
+  if (o.kind === "prochint") return; // строка-плейсхолдер загрузки списка
+  if (o.kind === "proc" && o.pid != null) {
+    try {
+      await invoke("kill_process", { pid: o.pid });
+      toast(t(SET.lang, "killed") + "  " + o.name);
+      PROCS = PROCS.filter(p => p.pid !== o.pid); // сразу убрать строку — без гонки/двойного kill
+      build(q.value);
+    } catch (e) { toast(String(e)); return; } // ошибка (напр. критический) — строка остаётся
+    procsT = 0;   // форсим рефетч для сверки со снапшотом
+    fetchProcs();
+    return;
+  }
   if (o.answer) {
     try { await navigator.clipboard.writeText(o.copyText ?? String(o.value)); } catch { /* нет фокуса — не критично */ }
     toast(t(SET.lang, "copied") + "  " + o.display);
@@ -653,14 +890,55 @@ async function run(o: Entry) {
   }
 }
 
+/* ============================ HISTORY ============================ */
+// История запросов в localStorage (последние 50, новые в конце). Листается
+// стрелками ↑/↓ только когда панель пуста (пустой ввод, нет строк) — навигацию
+// по результатам не ломает. Любой ввод символа выходит из режима истории.
+const HIST_KEY = "agora.hist";
+const HIST_MAX = 50;
+let histIdx = -1;   // -1 = не листаем; иначе индекс в массиве истории
+let histDraft = ""; // черновик до входа в историю
+
+function loadHist(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(HIST_KEY) ?? "[]");
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  } catch { return []; }
+}
+function pushHist(text: string) {
+  const s = text.trim();
+  if (!s) return;
+  let h = loadHist().filter(x => x !== s); // дедуп: убираем прошлое вхождение
+  h.push(s);
+  if (h.length > HIST_MAX) h = h.slice(h.length - HIST_MAX);
+  try { localStorage.setItem(HIST_KEY, JSON.stringify(h)); } catch { /* приватный режим */ }
+}
+
 /* ============================ EVENTS ============================ */
-q.addEventListener("input", () => build(q.value));
+q.addEventListener("input", () => { histIdx = -1; build(q.value); });
 q.addEventListener("keydown", (e) => {
-  if (e.key === "ArrowDown") { e.preventDefault(); setActive(active + 1); }
-  else if (e.key === "ArrowUp") { e.preventDefault(); setActive(active - 1); }
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    if (histIdx >= 0) {
+      const h = loadHist();
+      histIdx++;
+      if (histIdx >= h.length) { histIdx = -1; q.value = histDraft; } else q.value = h[histIdx];
+      build(q.value);
+    } else setActive(active + 1);
+  }
+  else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    const canHist = histIdx >= 0 || (q.value === "" && items.length === 0);
+    const h = canHist ? loadHist() : [];
+    if (canHist && h.length) {
+      if (histIdx < 0) { histDraft = q.value; histIdx = h.length; }
+      if (histIdx > 0) { histIdx = Math.min(histIdx, h.length) - 1; q.value = h[histIdx]; build(q.value); }
+    } else setActive(active - 1);
+  }
   else if (e.key === "Enter") { e.preventDefault(); if (items[active]) run(items[active].data); }
   else if (e.key === "Escape") {
     e.preventDefault();
+    histIdx = -1; // сброс режима истории
     if (q.value) { q.value = ""; build(""); } else hideAndReset();
   }
   else if ((e.metaKey || e.ctrlKey) && e.key >= "1" && e.key <= "9") {
@@ -681,6 +959,7 @@ launcher.addEventListener("mouseenter", () => {
 listen("focus-input", () => {
   q.focus();
   q.select();
+  histIdx = -1; // новый вызов лаунчера — история с начала
   refreshCatalog();
 });
 

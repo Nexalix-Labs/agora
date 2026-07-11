@@ -89,6 +89,13 @@ const EN = {
   act_g_appearance: "Appearance", act_g_power: "Power", act_g_storage: "Storage", act_g_prefs: "Preferences",
   grp_web: "Web search", web_engine_nm: "Default engine", web_engine_ds: "Used for the web fallback. Prefixes still work: g:, c:, gpt:",
   p_web2_nm: "Web & AI search", p_web2_ds: "Google, or ask an AI — type g:, c: (Claude), gpt:, p:",
+  p_conv_nm: "Converters", p_conv_ds: "Units, currency, number bases, timestamps — right in the bar. Try 10 km in mi, 100 usd to eur, 255 to hex.",
+  conv_length: "Length", conv_mass: "Mass", conv_volume: "Volume", conv_area: "Area",
+  conv_speed: "Speed", conv_time: "Duration", conv_data: "Data", conv_angle: "Angle",
+  conv_temp: "Temperature", conv_base: "Number base",
+  p_clip_nm: "Clipboard History", p_clip_ds: "Recent copies, kept in memory. Type “clip” to browse, Enter to reuse.",
+  p_kill_nm: "Kill Process", p_kill_ds: "Type “kill” to list running apps, add a name to filter, Enter to end it.",
+  killed: "Ended",
 };
 
 export type Key = keyof typeof EN;
@@ -159,6 +166,13 @@ const RU: Partial<Record<Key, string>> = {
   act_g_appearance: "Оформление", act_g_power: "Питание", act_g_storage: "Хранилище", act_g_prefs: "Параметры",
   grp_web: "Поиск в вебе", web_engine_nm: "Движок по умолчанию", web_engine_ds: "Для веб-фолбэка. Префиксы работают всегда: g:, c:, gpt:",
   p_web2_nm: "Веб и AI-поиск", p_web2_ds: "Google — или спросить AI: наберите g:, c: (Claude), gpt:, p:",
+  p_conv_nm: "Конвертеры", p_conv_ds: "Единицы, валюты, системы счисления, timestamp — прямо в строке. Напр. 10 km in mi, 100 usd to eur, 255 to hex.",
+  conv_length: "Длина", conv_mass: "Масса", conv_volume: "Объём", conv_area: "Площадь",
+  conv_speed: "Скорость", conv_time: "Длительность", conv_data: "Данные", conv_angle: "Угол",
+  conv_temp: "Температура", conv_base: "Система счисления",
+  p_clip_nm: "История буфера", p_clip_ds: "Последние копирования, в памяти. Наберите «буфер», Enter — вернуть в буфер.",
+  p_kill_nm: "Завершение процессов", p_kill_ds: "Наберите «kill» — список процессов, имя фильтрует, Enter завершает.",
+  killed: "Завершён",
 };
 
 const UK: Partial<Record<Key, string>> = {

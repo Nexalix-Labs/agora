@@ -22,7 +22,7 @@ interface Settings {
   wxLoc: { lat: number; lon: number; city: string } | null;
   webEngine: string;
   binds: Bind[];
-  plugins: { calc: boolean; syscmd: boolean; web: boolean; crypto: boolean; weather: boolean };
+  plugins: { calc: boolean; syscmd: boolean; web: boolean; crypto: boolean; weather: boolean; convert: boolean; clipboard: boolean; kill: boolean };
 }
 interface Bind {
   name: string;
@@ -35,7 +35,7 @@ const DEF: Settings = {
   lang: resolveLang(), hotkey: "Alt+Space", tray: true, theme: "dark", accent: "#0098EA",
   density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable", wxCity: "", wxLoc: null,
   webEngine: "google", binds: [],
-  plugins: { calc: true, syscmd: true, web: true, crypto: true, weather: true },
+  plugins: { calc: true, syscmd: true, web: true, crypto: true, weather: true, convert: true, clipboard: true, kill: true },
 };
 let S: Settings = { ...DEF, plugins: { ...DEF.plugins } };
 
@@ -617,6 +617,12 @@ const PLUGINS: { id: PluginId | null; nm: Key; ds: Key; raw: string }[] = [
     raw: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/>' },
   { id: "calc", nm: "p_calc_nm", ds: "p_calc_ds",
     raw: '<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M8 6h8M8 12h.01M12 12h.01M16 12h.01M8 16h.01M12 16h.01M16 16h.01"/>' },
+  { id: "convert", nm: "p_conv_nm", ds: "p_conv_ds",
+    raw: '<path d="M7 16V4M7 4 3 8M7 4l4 4"/><path d="M17 8v12M17 20l4-4M17 20l-4-4"/>' },
+  { id: "clipboard", nm: "p_clip_nm", ds: "p_clip_ds",
+    raw: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>' },
+  { id: "kill", nm: "p_kill_nm", ds: "p_kill_ds",
+    raw: '<rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>' },
   { id: "syscmd", nm: "p_sys_nm", ds: "p_sys_ds",
     raw: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>' },
   { id: "crypto", nm: "p_crypto_nm", ds: "p_crypto_ds",

@@ -552,8 +552,408 @@ fn set_settings(
     if let Ok(mut s) = state.0.lock() {
         *s = value.clone();
     }
+    // Выключили историю буфера — немедленно стираем накопленное из памяти.
+    if value
+        .get("plugins")
+        .and_then(|p| p.get("clipboard"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+    {
+        clip_clear(&app);
+    }
     let _ = app.emit("settings-changed", value);
     Ok(())
+}
+
+/* ======================= CLIPBOARD HISTORY ======================= */
+// История копирований — только в памяти (не на диск: приватность). Фоновый
+// поток опрашивает GetClipboardSequenceNumber (дёшево, без открытия буфера);
+// на смене — читает CF_UNICODETEXT, кладёт в кольцо (последние 50, дедуп).
+// Уважает opt-out парольных менеджеров (ExcludeClipboardContentFromMonitorProcessing).
+
+use std::collections::VecDeque;
+
+struct ClipboardState(Mutex<VecDeque<String>>);
+
+const CLIP_MAX: usize = 50;
+const CLIP_TEXT_CAP: usize = 20_000;
+// Стабильная ABI-константа формата (не тянем Win32_System_Ole ради CF_UNICODETEXT).
+#[cfg(windows)]
+const CF_UNICODETEXT_U32: u32 = 13;
+
+enum ClipRead {
+    Retry, // буфер занят другим процессом — повторить на следующем тике
+    Skip,  // не текст / исключён / пусто — просто пропустить
+    Text(String),
+}
+
+#[cfg(windows)]
+fn wide_z(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn read_clipboard_text() -> ClipRead {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+        RegisterClipboardFormatW,
+    };
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+
+    // SAFETY: OpenClipboard парен CloseClipboard на каждом пути выхода; читаем
+    // заблокированную GlobalLock память в пределах GlobalSize, снимаем GlobalUnlock.
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            return ClipRead::Retry;
+        }
+        let exclude_name = wide_z("ExcludeClipboardContentFromMonitorProcessing");
+        let exclude = RegisterClipboardFormatW(PCWSTR(exclude_name.as_ptr()));
+        if exclude != 0 && IsClipboardFormatAvailable(exclude).is_ok() {
+            let _ = CloseClipboard();
+            return ClipRead::Skip; // менеджер паролей запретил историю
+        }
+        // Второй стандартный opt-out истории Windows: CanIncludeInClipboardHistory
+        // присутствует и его DWORD == 0.
+        let cich_name = wide_z("CanIncludeInClipboardHistory");
+        let cich = RegisterClipboardFormatW(PCWSTR(cich_name.as_ptr()));
+        if cich != 0 && IsClipboardFormatAvailable(cich).is_ok() {
+            if let Ok(h) = GetClipboardData(cich) {
+                if !h.is_invalid() {
+                    let hg = HGLOBAL(h.0);
+                    let p = GlobalLock(hg).cast::<u32>();
+                    let excluded = !p.is_null() && *p == 0;
+                    if !p.is_null() {
+                        let _ = GlobalUnlock(hg);
+                    }
+                    if excluded {
+                        let _ = CloseClipboard();
+                        return ClipRead::Skip;
+                    }
+                }
+            }
+        }
+        if IsClipboardFormatAvailable(CF_UNICODETEXT_U32).is_err() {
+            let _ = CloseClipboard();
+            return ClipRead::Skip; // не текст (картинка/файлы)
+        }
+        let text = match GetClipboardData(CF_UNICODETEXT_U32) {
+            Ok(h) if !h.is_invalid() => {
+                let hg = HGLOBAL(h.0);
+                let ptr = GlobalLock(hg).cast::<u16>();
+                if ptr.is_null() {
+                    None
+                } else {
+                    let max_len = GlobalSize(hg) / 2;
+                    let mut len = 0usize;
+                    while len < max_len && *ptr.add(len) != 0 {
+                        len += 1;
+                    }
+                    let slice = std::slice::from_raw_parts(ptr, len);
+                    let s = String::from_utf16_lossy(slice);
+                    let _ = GlobalUnlock(hg);
+                    Some(s)
+                }
+            }
+            _ => None,
+        };
+        let _ = CloseClipboard();
+        match text {
+            Some(s) if !s.trim().is_empty() => {
+                let s: String = s.chars().take(CLIP_TEXT_CAP).collect();
+                ClipRead::Text(s)
+            }
+            _ => ClipRead::Skip,
+        }
+    }
+}
+
+#[cfg(windows)]
+fn set_clipboard_text(s: &str) -> Result<(), String> {
+    use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+
+    let data = wide_z(s);
+    // SAFETY: hg готовим ДО OpenClipboard/EmptyClipboard — иначе сбой оставил бы
+    // пользователя с пустым буфером. На любой ошибке освобождаем hg; после
+    // успешного SetClipboardData владение hg переходит системе (не освобождаем).
+    unsafe {
+        let hg: HGLOBAL = GlobalAlloc(GMEM_MOVEABLE, data.len() * 2).map_err(|e| e.to_string())?;
+        let ptr = GlobalLock(hg).cast::<u16>();
+        if ptr.is_null() {
+            let _ = GlobalFree(hg);
+            return Err("GlobalLock failed".into());
+        }
+        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+        let _ = GlobalUnlock(hg);
+
+        if let Err(e) = OpenClipboard(None) {
+            let _ = GlobalFree(hg);
+            return Err(e.to_string());
+        }
+        let res = (|| -> Result<(), String> {
+            EmptyClipboard().map_err(|e| e.to_string())?;
+            SetClipboardData(CF_UNICODETEXT_U32, HANDLE(hg.0)).map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        let _ = CloseClipboard();
+        if res.is_err() {
+            let _ = GlobalFree(hg); // владение не перешло системе — освобождаем
+        }
+        res
+    }
+}
+
+#[cfg(not(windows))]
+fn read_clipboard_text() -> ClipRead {
+    ClipRead::Skip
+}
+#[cfg(not(windows))]
+fn set_clipboard_text(_s: &str) -> Result<(), String> {
+    Err("clipboard unsupported on this platform".into())
+}
+
+fn clip_push(app: &AppHandle, s: String) {
+    if let Some(state) = app.try_state::<ClipboardState>() {
+        if let Ok(mut dq) = state.0.lock() {
+            dq.retain(|x| x != &s); // дедуп: старое вхождение убираем
+            dq.push_front(s);
+            while dq.len() > CLIP_MAX {
+                dq.pop_back();
+            }
+        }
+    }
+}
+
+/// Плагин истории буфера включён? (дефолт — да). Настройка живёт в SettingsState.
+fn clipboard_enabled(app: &AppHandle) -> bool {
+    let Some(state) = app.try_state::<SettingsState>() else {
+        return true;
+    };
+    let Ok(v) = state.0.lock() else {
+        return true;
+    };
+    v.get("plugins")
+        .and_then(|p| p.get("clipboard"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Стереть собранную историю из памяти (при отключении плагина).
+fn clip_clear(app: &AppHandle) {
+    if let Some(state) = app.try_state::<ClipboardState>() {
+        if let Ok(mut dq) = state.0.lock() {
+            dq.clear();
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_clipboard_watcher(app: AppHandle) {
+    use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
+    std::thread::spawn(move || {
+        let mut last = unsafe { GetClipboardSequenceNumber() };
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            let seq = unsafe { GetClipboardSequenceNumber() };
+            if seq == last {
+                continue;
+            }
+            // Отключено пользователем — не собираем и чистим уже собранное.
+            if !clipboard_enabled(&app) {
+                clip_clear(&app);
+                last = seq;
+                continue;
+            }
+            match read_clipboard_text() {
+                ClipRead::Retry => {} // буфер занят — не двигаем last, повторим
+                ClipRead::Skip => last = seq,
+                ClipRead::Text(s) => {
+                    last = seq;
+                    clip_push(&app, s);
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn spawn_clipboard_watcher(_app: AppHandle) {}
+
+#[tauri::command]
+fn clipboard_history(app: AppHandle, state: State<'_, ClipboardState>) -> Vec<String> {
+    if !clipboard_enabled(&app) {
+        return Vec::new();
+    }
+    state
+        .0
+        .lock()
+        .map(|dq| dq.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn set_clipboard(text: String) -> Result<(), String> {
+    set_clipboard_text(&text)
+}
+
+/* ======================= PROCESSES (kill) ======================= */
+// Список процессов (имя+pid+рабочее множество) и завершение по pid. Фронт
+// показывает список и «помогает выбрать» — Enter на строке шлёт kill_process(pid).
+
+#[derive(Serialize, Clone)]
+struct ProcInfo {
+    pid: u32,
+    name: String,
+    mem: u64, // working set, байты
+}
+
+/// Всегда-критические образы: их завершение роняет систему (CRITICAL_PROCESS_DIED).
+/// Первый барьер (не показываем в списке); второй — IsProcessCritical в kill_process.
+fn is_critical_name(name: &str) -> bool {
+    const CRIT: &[&str] = &[
+        "csrss.exe",
+        "wininit.exe",
+        "winlogon.exe",
+        "services.exe",
+        "lsass.exe",
+        "smss.exe",
+        "system",
+        "registry",
+    ];
+    let n = name.to_ascii_lowercase();
+    CRIT.contains(&n.as_str())
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn list_processes() -> Vec<ProcInfo> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let self_pid = std::process::id();
+    let mut out: Vec<ProcInfo> = Vec::new();
+    // SAFETY: снапшот закрываем; заполняем только переданную PROCESSENTRY32W
+    // (dwSize выставлен перед Process32FirstW).
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return out;
+        };
+        let mut e = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        if Process32FirstW(snap, &mut e).is_ok() {
+            loop {
+                let pid = e.th32ProcessID;
+                let n = e
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(e.szExeFile.len());
+                let name = String::from_utf16_lossy(&e.szExeFile[..n]);
+                // Прячем: System (0/4), себя и свои дочерние (WebView2), критические
+                // системные процессы (их завершение = BSOD).
+                if pid != 0
+                    && pid != 4
+                    && pid != self_pid
+                    && e.th32ParentProcessID != self_pid
+                    && !name.is_empty()
+                    && !is_critical_name(&name)
+                {
+                    out.push(ProcInfo {
+                        pid,
+                        name,
+                        mem: proc_working_set(pid),
+                    });
+                }
+                if Process32NextW(snap, &mut e).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+    // Крупные потребители памяти — сверху (их чаще и «килляют»).
+    out.sort_by(|a, b| b.mem.cmp(&a.mem));
+    out
+}
+
+#[cfg(windows)]
+fn proc_working_set(pid: u32) -> u64 {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    // SAFETY: хэндл закрываем; GetProcessMemoryInfo заполняет переданную структуру.
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return 0;
+        };
+        let mut pmc = PROCESS_MEMORY_COUNTERS::default();
+        let cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let ws = if GetProcessMemoryInfo(h, &mut pmc, cb).is_ok() {
+            pmc.WorkingSetSize as u64
+        } else {
+            0
+        };
+        let _ = CloseHandle(h);
+        ws
+    }
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn kill_process(pid: u32) -> Result<(), String> {
+    use windows::Win32::Foundation::{CloseHandle, BOOL, ERROR_ACCESS_DENIED};
+    use windows::Win32::System::Threading::{
+        IsProcessCritical, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_TERMINATE,
+    };
+
+    // SAFETY: хэндл закрываем на всех путях; Is/Terminate принимают валидный хэндл.
+    unsafe {
+        let h = match OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            pid,
+        ) {
+            Ok(h) => h,
+            // Точная причина вместо всегда-«нужен админ»: мёртвый pid, PPL и т.п.
+            Err(e) if e.code() == ERROR_ACCESS_DENIED.to_hresult() => {
+                return Err("Нет доступа (нужны права администратора)".into());
+            }
+            Err(e) => return Err(e.message()),
+        };
+        // Критический процесс (ProcessBreakOnTermination) — завершение = BSOD.
+        // Второй барьер к денилисту имён: отказываем даже под админом.
+        let mut crit = BOOL::default();
+        if IsProcessCritical(h, &mut crit).is_ok() && crit.as_bool() {
+            let _ = CloseHandle(h);
+            return Err("Критический системный процесс — завершение запрещено".into());
+        }
+        let res = TerminateProcess(h, 1).map_err(|e| e.to_string());
+        let _ = CloseHandle(h);
+        res
+    }
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn list_processes() -> Vec<ProcInfo> {
+    Vec::new()
+}
+#[cfg(not(windows))]
+#[tauri::command]
+fn kill_process(_pid: u32) -> Result<(), String> {
+    Err("process control unsupported on this platform".into())
 }
 
 /// Цель кастомного бинда: shell:AppsFolder-элементы через explorer,
@@ -622,8 +1022,58 @@ fn show_settings(app: &AppHandle) {
     }
 }
 
-/// Спотлайт-позиция: по центру, верхняя треть экрана.
+/// Полный `MONITORINFO` монитора под курсором мыши (физические px виртуального
+/// рабочего стола). Процесс per-monitor-v2 DPI-aware (Tauri v2 через tao),
+/// поэтому GetCursorPos, MonitorFromPoint и rcMonitor/rcWork живут в одном
+/// координатном пространстве — без DPI-коррекции.
+#[cfg(windows)]
+fn cursor_monitor_info() -> Option<windows::Win32::Graphics::Gdi::MONITORINFO> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut pt = POINT::default();
+    // SAFETY: pt — валидный &mut POINT; вызовы лишь заполняют переданные структуры.
+    unsafe { GetCursorPos(&mut pt) }.ok()?;
+    let mon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetMonitorInfoW(mon, &mut mi) }.as_bool() {
+        Some(mi)
+    } else {
+        None
+    }
+}
+
+/// Спотлайт-позиция: центр монитора ПОД КУРСОРОМ, верхняя треть.
+/// Монитор берём по мыши (сигнал «где сейчас пользователь»), а не по
+/// current_monitor() — скрытое окно всё ещё числится на старом (обычно
+/// главном) мониторе, из-за чего лаунчер всегда открывался не там.
 fn position_spotlight(w: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    if let Some(mi) = cursor_monitor_info() {
+        let m = mi.rcMonitor;
+        // Шаг 1: перенести окно на целевой монитор. Если у него DPI отличается
+        // от текущего (2K@150% vs FHD@100%), tao по WM_DPICHANGED сам ресайзит
+        // окно под масштаб цели. set_position с не-main потока асинхронный, но
+        // блокирующий outer_size() ниже — барьер: событийный цикл FIFO, к моменту
+        // его ответа перенос и смена DPI уже применены.
+        let _ = w.set_position(tauri::PhysicalPosition::new(m.left, m.top));
+        // Шаг 2: outer_size уже в физ. px целевого монитора → точный центр по
+        // горизонтали независимо от разрешения/масштаба.
+        if let Ok(size) = w.outer_size() {
+            let x = m.left + ((m.right - m.left) - size.width as i32) / 2;
+            let y = m.top + (f64::from(m.bottom - m.top) * 0.16) as i32;
+            let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+            return;
+        }
+    }
+
+    // Деградация (GetCursorPos не сработал / нет монитора): current_monitor → center.
     if let (Ok(Some(mon)), Ok(size)) = (w.current_monitor(), w.outer_size()) {
         let mpos = mon.position();
         let msize = mon.size();
@@ -757,7 +1207,11 @@ fn build_tray(app: &AppHandle, lang: &str) -> tauri::Result<()> {
 // Точка входа: паника при инициализации Tauri — невосстановимый баг старта,
 // а не рантайм-путь. expect здесь оправдан.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-#[allow(clippy::expect_used, clippy::missing_panics_doc)]
+#[allow(
+    clippy::expect_used,
+    clippy::missing_panics_doc,
+    clippy::too_many_lines
+)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -767,6 +1221,7 @@ pub fn run() {
             Some(vec![]),
         ))
         .manage(IconCache::default())
+        .manage(ClipboardState(Mutex::new(VecDeque::new())))
         .invoke_handler(tauri::generate_handler![
             index_apps,
             recent_files,
@@ -776,6 +1231,10 @@ pub fn run() {
             run_action,
             get_settings,
             set_settings,
+            clipboard_history,
+            set_clipboard,
+            list_processes,
+            kill_process,
             quit
         ])
         .setup(|app| {
@@ -807,6 +1266,9 @@ pub fn run() {
                     let _ = apply_hotkeys(app.handle(), &serde_json::json!({}));
                 }
                 app.manage(SettingsState(Mutex::new(initial)));
+
+                // Фоновый наблюдатель за буфером обмена (история копирований).
+                spawn_clipboard_watcher(app.handle().clone());
 
                 // Тихая проверка обновлений при старте. NSIS ставится silent,
                 // приложение перезапускается установщиком. Ошибки глотаем —

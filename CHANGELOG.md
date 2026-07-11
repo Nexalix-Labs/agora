@@ -8,7 +8,40 @@ See [CONTRIBUTING.md](CONTRIBUTING.md#versioning) for the release rules.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- Converters plugin: type a conversion straight into the bar.
+  - Units — length, mass, volume, area, speed, duration, digital storage
+    and angle. `10 km in mi`, `72f to c`, `5 kg to lb`, `2 gb to mb`.
+    Digital storage uses binary units (1 KB = 1024 B), matching Explorer.
+  - Currency — live rates for 50 codes via exchangerate-api (no key),
+    cached one hour. `100 usd to eur`, `1500 rub to usd`.
+  - Number bases — `255 to hex`, `0b1010 to dec`; a bare literal like
+    `0xFF` shows its decimal, octal and binary forms at once.
+  - Timestamps — `unix now` for the current epoch, `1700000000 as date`
+    to read an epoch back as local + UTC time.
+- Query history: press ↑ on an empty bar to recall recent queries, ↓ to
+  step back toward what you were typing. Last 50, stored locally.
+- Clipboard History plugin: everything you copy is kept (last 50, in
+  memory only — never written to disk). Type `clip` (or `буфер`) to
+  browse, add words to filter, Enter to put an entry back on the
+  clipboard. Respects apps that opt out of clipboard history (password
+  managers), and skips non-text and empty copies. Disabling the plugin
+  stops collection and clears what was already captured.
+- Kill Process plugin: type `kill` for a live list of running processes
+  (biggest by memory first), add a name to filter (`kill chrome`), and
+  press Enter to end the selected one — the list refreshes so you can
+  end more. Shows PID and memory to tell duplicates apart. Critical
+  system processes are hidden and refused (checked with `IsProcessCritical`)
+  so you can't blue-screen the machine even when running elevated; Agora's
+  own processes are excluded too.
+
+### Fixed
+- Launcher now opens on the monitor under the mouse cursor, not always the
+  primary one. It previously read `current_monitor()` of the still-hidden
+  window, which resolves to the default monitor regardless of where you
+  are. Now the target monitor is picked from the live cursor position
+  (`GetCursorPos` → `MonitorFromPoint`), with a `current_monitor`/`center`
+  fallback.
 
 ## [0.7.0] — 2026-07-08
 
