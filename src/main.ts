@@ -1,9 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import { RTL, t, resolveLang } from "./i18n";
 import { ENGINES, engineById, engineByPrefix, engineUrl, type Engine } from "./engines";
-import { convertUnits, fmtNum, parseIntLiteral, toBase, CURRENCIES, type UnitResult } from "./units";
+import { convertUnits, fmtNum, parseIntLiteral, toBase, CURRENCIES, UNIT_TOKENS, type UnitResult } from "./units";
 
 /* ============================ TYPES ============================ */
 interface Entry {
@@ -20,7 +21,12 @@ interface Entry {
   value?: number;
   display?: string;
   copyText?: string;   // что копировать по Enter (по умолчанию value)
+  plan?: string;       // для схемы питания — GUID схемы
+  update?: boolean;    // строка-предложение обновиться
   pid?: number;        // для kind "proc" — какой процесс завершать
+  host?: string;       // для kind "ssh" — алиас из ssh_config
+  ms?: number | null;  // для kind "ssh" — время TCP-коннекта (null = не дошли)
+  pstate?: string;     // для kind "ssh" — open | refused | timeout | dns
 }
 
 interface Settings {
@@ -33,17 +39,18 @@ interface Settings {
   blur: boolean;
   recent: boolean;
   autoupdate: boolean;
-  channel: string;
   wxCity: string;
   wxLoc: { lat: number; lon: number; city: string } | null;
   webEngine: string;   // движок по умолчанию для веб-поиска
-  plugins: { calc: boolean; syscmd: boolean; web: boolean; crypto: boolean; weather: boolean; convert: boolean; clipboard: boolean; kill: boolean };
+  sshShell: string;    // в чём открывать сессию: direct | powershell | pwsh | cmd
+  sshProfile: string;  // профиль Windows Terminal (пусто — по умолчанию)
+  plugins: { calc: boolean; syscmd: boolean; pcmode: boolean; web: boolean; crypto: boolean; weather: boolean; convert: boolean; clipboard: boolean; kill: boolean; ssh: boolean };
 }
 const DEF: Settings = {
   lang: resolveLang(), hotkey: "Alt+Space", tray: true, theme: "dark", accent: "#0098EA",
-  density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable", wxCity: "", wxLoc: null,
-  webEngine: "google",
-  plugins: { calc: true, syscmd: true, web: true, crypto: true, weather: true, convert: true, clipboard: true, kill: true },
+  density: "cozy", blur: true, recent: false, autoupdate: true, wxCity: "", wxLoc: null,
+  webEngine: "google", sshShell: "direct", sshProfile: "",
+  plugins: { calc: true, syscmd: true, pcmode: true, web: true, crypto: true, weather: true, convert: true, clipboard: true, kill: true, ssh: true },
 };
 let SET: Settings = { ...DEF, plugins: { ...DEF.plugins } };
 
@@ -70,6 +77,9 @@ const I = {
   sun:    S('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
   clip:   S('<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>'),
   proc:   S('<rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>'),
+  game:   S('<path d="M6 12h4M8 10v4M15 13h.01M18 11h.01"/><rect x="2" y="6" width="20" height="12" rx="4"/>'),
+  work:   S('<rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>'),
+  ssh:    S('<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 9.5l2.5 2.5L7 14.5M12.5 15H17"/>'),
 };
 
 /* ============================ CATALOG ============================ */
@@ -97,12 +107,47 @@ const ACTION_DEFS: ActionDef[] = [
     kw: "lock screen блокировка заблокировать замок экран" },
   { actionId: "settings", icon: "gear", nameKey: "act_settings", subKey: "act_g_prefs",
     kw: "settings preferences настройки параметры опции конфигурация" },
+  { actionId: "game_mode", icon: "game", nameKey: "act_game", subKey: "act_g_mode",
+    kw: "game gaming mode fps performance high perf игровой игра режим производительность" },
+  { actionId: "work_mode", icon: "work", nameKey: "act_work", subKey: "act_g_mode",
+    kw: "work mode focus productivity balanced quiet рабочий работа режим тихий баланс" },
 ];
-function actionEntries(lang: string): Entry[] {
-  return ACTION_DEFS.map(d => ({
-    name: t(lang, d.nameKey), sub: t(lang, d.subKey),
-    kind: "action", icon: d.icon, actionId: d.actionId, keywords: d.kw,
+// Активный режим ПК ("game" | "work" | "") — читается из Rust при показе окна
+// и обновляется сразу после переключения, чтобы строка показывала состояние.
+let PC_MODE = "";
+
+// Схемы питания из системы (те же, что в powercfg.cpl). GAME/WORK Rust не
+// отдаёт — они уже представлены действиями «игровой/рабочий режим».
+interface PowerPlan { guid: string; name: string; active: boolean }
+let PLANS: PowerPlan[] = [];
+const PLAN_KW = "power plan scheme powercfg battery energy performance "
+  + "схема план питание электропитание питания энергосбережение производительность";
+
+function planEntries(lang: string): Entry[] {
+  return PLANS.map(p => ({
+    name: p.name,
+    sub: t(lang, "act_g_plan") + (p.active ? " · " + t(lang, "mode_on") : ""),
+    kind: "action", icon: "power" as const, plan: p.guid,
+    keywords: PLAN_KW + " " + p.name,
   }));
+}
+
+// Встроенные режимы ПК — отдельный тумблер: кому хватает голых схем питания,
+// тот выключает их и не видит в лаунчере.
+const MODE_ACTIONS = new Set(["game_mode", "work_mode"]);
+
+function actionEntries(lang: string): Entry[] {
+  return ACTION_DEFS
+    .filter(d => SET.plugins.pcmode || !MODE_ACTIONS.has(d.actionId))
+    .map(d => {
+      const on = (d.actionId === "game_mode" && PC_MODE === "game")
+              || (d.actionId === "work_mode" && PC_MODE === "work");
+      return {
+        name: t(lang, d.nameKey),
+        sub: t(lang, d.subKey) + (on ? " · " + t(lang, "mode_on") : ""),
+        kind: "action", icon: d.icon, actionId: d.actionId, keywords: d.kw,
+      };
+    });
 }
 
 async function refreshCatalog() {
@@ -120,6 +165,11 @@ async function refreshCatalog() {
   if (SET.plugins.clipboard) {
     try { CLIPS = await invoke<string[]>("clipboard_history"); } catch { CLIPS = []; }
   } else CLIPS = [];
+  // Активный режим ПК — для индикации в строках game/work.
+  if (SET.plugins.syscmd) {
+    try { PC_MODE = await invoke<string>("pc_mode"); } catch { PC_MODE = ""; }
+    try { PLANS = await invoke<PowerPlan[]>("power_plans"); } catch { PLANS = []; }
+  } else PLANS = [];
   build(q.value);
 }
 
@@ -191,9 +241,12 @@ function prepareExpr(input: string): string | null {
        .replace(/\)\s*(?=[\d.]|Math)/g, ")*")            // )2 , )Math
        .replace(/([\d.])\s*(?=Math)/g, "$1*");           // 2Math
   s = s.replace(/\^/g, "**");
-  // умный процент: A ± B%  ->  A ± A*B/100
-  s = s.replace(/(\d+(?:\.\d+)?)\s*([+\-])\s*(\d+(?:\.\d+)?)\s*%/g, "$1$2$1*$3/100");
-  s = s.replace(/%/g, "/100");
+  // умный процент: A ± B%  ->  A ± A*B/100 (не срабатывает, если за % идёт
+  // операнд — включая Math.*, функции уже переписаны к этому моменту)
+  s = s.replace(/(\d+(?:\.\d+)?)\s*([+\-])\s*(\d+(?:\.\d+)?)\s*%(?!\s*[\d.(M])/g, "$1$2$1*$3/100");
+  // Хвостовой % — доля (50% -> 0.5); % перед операндом — остаток JS (10%3 -> 1),
+  // иначе «10%3» превращалось бы в 10/1003 и выдавало уверенно неверный ответ.
+  s = s.replace(/%(?!\s*[\d.(M])/g, "/100");
 
   // Валидация: после вычистки Math.* и чисел/операторов чужих букв быть не должно.
   if (/[a-z]/i.test(s.replace(/Math\.[a-z0-9]+/gi, ""))) return null;
@@ -276,16 +329,36 @@ function parseCrypto(query: string): { amount: number; word: string; hasAmount: 
   return null;
 }
 
+// Приватность: не отправляем в CoinGecko слова, которые заведомо не тикеры.
+// «10 kg» — единица/валюта (кроме «ton»: Toncoin приоритетнее тонны; голые
+// токены вроде «gram» не гейтим — документированный крипто-кейс),
+// «kill»/«clip»/«weather» — ключевые слова режимов, ТОЧНОЕ имя установленного
+// приложения («steam», «zoom») — поиск, не крипта. Именно точное: сабстринг
+// душил бы «sol» (Solitaire) и «one» (OneDrive).
+const CRYPTO_OVER_UNIT = new Set(["ton"]);
+function cryptoGated(word: string, hasAmount: boolean): boolean {
+  if (hasAmount && !CRYPTO_OVER_UNIT.has(word) && (UNIT_TOKENS.has(word) || CURRENCIES.has(word))) return true;
+  if (!hasAmount && CURRENCIES.has(word)) return true;
+  if (WX_WORDS.has(word) || CLIP_KW.test(word) || KILL_KW.test(word) || SSH_KW.test(word)) return true;
+  if (!hasAmount && APPS.some(a => a.name.toLowerCase() === word || a.keywords?.toLowerCase() === word)) return true;
+  return false;
+}
+
 function tryCrypto(query: string): Entry | null {
   const p0 = parseCrypto(query);
   if (!p0 || !isFinite(p0.amount)) return null;
   const { word, amount, hasAmount } = p0;
 
+  if (cryptoGated(word, hasAmount)) return null;
+
   if (!symCache.has(word)) {
     // Незнакомое слово — резолвим после паузы ввода, строку пока не показываем.
     if (resolveT) clearTimeout(resolveT);
     resolveT = setTimeout(() => {
-      if (parseCrypto(q.value)?.word === word) resolveSymbol(word);
+      const cur = parseCrypto(q.value);
+      // Гейт повторно: к моменту срабатывания таймера каталог приложений
+      // мог загрузиться — запланированный до этого запрос не должен утечь.
+      if (cur?.word === word && !cryptoGated(word, cur.hasAmount)) resolveSymbol(word);
     }, 350);
     return null;
   }
@@ -587,7 +660,11 @@ function tryWeather(query: string): Entry[] | null {
 /* ============================ WEB SEARCH ============================ */
 // Префикс движка: "g: погода", "c: объясни рекурсию", "gpt: …". Пусто -> null.
 function matchEnginePrefix(query: string): { engine: Engine; text: string } | null {
-  const m = query.trim().match(/^([a-z]+):\s*(.+)$/i);
+  const s = query.trim();
+  // «c:\users\…» / «d:/…» — путь Windows (одна буква + \ или / сразу после
+  // двоеточия), не префикс движка. «g: /r/rust» и «gpt:/x» — движок.
+  if (/^[a-z]:[\\/]/i.test(s)) return null;
+  const m = s.match(/^([a-z]+):\s*(.+)$/i);
   if (!m) return null;
   const engine = engineByPrefix(m[1]);
   return engine ? { engine, text: m[2].trim() } : null;
@@ -601,6 +678,30 @@ function webEntry(e: Engine, text: string): Entry {
     icon: e.ai ? "spark" : "web",
     url: engineUrl(e, text),
   };
+}
+
+/* ====================== DIRECT OPEN (url / path) ====================== */
+// «github.com» / «https://…» -> открыть в браузере вместо веб-поиска;
+// «C:\…» / «\\server\share» -> открыть путь Проводником/ассоциацией.
+// Без sh/so/in: коллизия с расширениями файлов (setup.sh, libc.so, Makefile.in)
+// перехватывала бы Enter у настоящего файла из «недавних».
+const TLD_RE = /^[a-z0-9-]+(\.[a-z0-9-]+)*\.(com|org|net|io|dev|app|ai|me|co|gg|tv|xyz|info|ru|ua|by|kz|de|fr|uk|us|pl|tr|cn|jp|kr|br|es|it|nl|ch|se|fi|no|cz|eu)(:\d+)?([/?#]\S*)?$/i;
+
+function tryUrl(query: string): Entry | null {
+  const s = query.trim();
+  if (/\s/.test(s)) return null;
+  const hasScheme = /^https?:\/\/\S+$/i.test(s);
+  if (!hasScheme && !TLD_RE.test(s)) return null;
+  return {
+    name: s, sub: t(SET.lang, "url_open"), kind: "search", icon: "web",
+    url: hasScheme ? s : "https://" + s,
+  };
+}
+
+function tryPath(query: string): Entry | null {
+  const s = query.trim();
+  if (!/^([a-z]:[\\/]|\\\\)/i.test(s)) return null;
+  return { name: s, sub: t(SET.lang, "path_open"), kind: "file", icon: "folder", path: s };
 }
 
 /* ============================ CLIPBOARD ============================ */
@@ -666,8 +767,172 @@ function killMode(query: string): Entry[] {
   }));
 }
 
+/* ============================ SSH ============================ */
+// Ключевое слово ssh -> хосты из ~/.ssh/config (парсит Rust); хвост фильтрует по
+// алиасу/адресу/пользователю. Enter открывает терминал с подключением.
+// Доступность — TCP-коннект до порта хоста в Rust, тянется по требованию:
+// таймеров нет намеренно, сигнала «панель скрыли» в приложении не существует,
+// а интервал без него тикал бы вечно и долбил чужие серверы.
+interface SshHost {
+  alias: string; hostname: string; user: string;
+  port: number; identity: string; forwards: number; managed: boolean;
+}
+interface SshPing { alias: string; ms: number | null; state: string }
+const SSH_KW = /^(?:ssh)(?:\s+([\s\S]*))?$/i;
+const SSH_TTL = 15000;   // столько живут и список хостов, и результаты проб
+const SSH_SLOW = 150;    // мс, выше которого задержка перестаёт быть «быстрой»
+let HOSTS: SshHost[] = [];
+let hostsT = 0;
+let hostsBusy = false;
+const PINGS = new Map<string, SshPing>();
+const pingAsked = new Set<string>(); // кого уже спрашивали в текущем окне TTL
+let pingT = 0;
+let pingBusy = false;
+
+let SSH_CLIENT = true; // есть ли системный OpenSSH — спрашиваем, только если пусто
+
+async function fetchHosts() {
+  hostsBusy = true;
+  try {
+    HOSTS = await invoke<SshHost[]>("ssh_hosts");
+    // Пустой список без объяснения выглядит как поломка: отличаем «нет хостов»
+    // от «нет клиента». Лишний IPC только в этом случае.
+    if (!HOSTS.length) SSH_CLIENT = await invoke<boolean>("ssh_client_present");
+  }
+  catch { HOSTS = []; }
+  // Метку ставим и при ошибке — иначе build() в finally зациклит рефетч.
+  finally { hostsT = Date.now(); hostsBusy = false; build(q.value); }
+}
+
+async function fetchPings(aliases: string[]) {
+  pingBusy = true;
+  // Помечаем ДО запроса: хост, на который Rust не ответил (конфиг разъехался),
+  // иначе считался бы «неспрошенным» вечно и крутил бы пробу без остановки.
+  aliases.forEach(a => pingAsked.add(a));
+  try {
+    const res = await invoke<SshPing[]>("ssh_probe", { aliases });
+    res.forEach(p => PINGS.set(p.alias, p));
+  } catch { /* проба не удалась — строки просто останутся без индикатора */ }
+  finally { pingT = Date.now(); pingBusy = false; build(q.value); }
+}
+
+/** Текст и класс индикатора: пусто, пока проба не вернулась. */
+function pingView(o: Entry): { text: string; cls: string } {
+  if (o.pstate === "open" && o.ms != null) {
+    return { text: o.ms + " ms", cls: o.ms >= SSH_SLOW ? "slow" : "ok" };
+  }
+  if (o.pstate === "refused") return { text: t(SET.lang, "ssh_refused"), cls: "bad" };
+  if (o.pstate === "timeout") return { text: "—", cls: "bad" };
+  if (o.pstate === "dns") return { text: "?", cls: "bad" };
+  return { text: "", cls: "" };
+}
+
+function sshMode(query: string): Entry[] {
+  const m = query.match(SSH_KW);
+  if (!m) return [];
+  const filter = (m[1] ?? "").trim().toLowerCase();
+  if (Date.now() - hostsT > SSH_TTL && !hostsBusy) fetchHosts();
+  const add: Entry = {
+    name: t(SET.lang, "ssh_add"), sub: "", kind: "action", icon: "gear", actionId: "settings",
+  };
+  if (!HOSTS.length) {
+    // Держим режим строкой-плейсхолдером, пока грузим, — чтобы не мигал веб-поиск.
+    if (hostsBusy) return [{ name: "…", sub: "", kind: "sshhint", icon: "ssh" }];
+    // С хвостом запроса молча уступаем обычному поиску: «ssh» — ещё и начало
+    // кучи обычных слов, и режим не должен держать их в заложниках.
+    if (filter) return [];
+    if (!SSH_CLIENT) return [{ name: t(SET.lang, "ssh_no_client"), sub: "", kind: "sshhint", icon: "ssh" }];
+    return [{ name: t(SET.lang, "ssh_no_hosts"), sub: "", kind: "sshhint", icon: "ssh" }, add];
+  }
+  const list = filter
+    ? HOSTS.filter(h => (h.alias + " " + h.hostname + " " + h.user).toLowerCase().includes(filter))
+    : HOSTS;
+  // Совпадений нет — тоже уступаем: «ssh keygen» должен находить приложение.
+  if (filter && !list.length) return [];
+  const shown = list.slice(0, 13); // +1 строка «добавить» = те же 14, что у kill
+
+  if (!pingBusy && shown.length) {
+    if (Date.now() - pingT > SSH_TTL) pingAsked.clear(); // TTL вышел — пробуем заново
+    const need = shown.filter(h => !pingAsked.has(h.alias)).map(h => h.alias);
+    if (need.length) fetchPings(need);
+  }
+
+  const rows: Entry[] = shown.map(h => {
+    const p = PINGS.get(h.alias);
+    const target = (h.user ? h.user + "@" : "") + h.hostname + (h.port === 22 ? "" : ":" + h.port);
+    const tunnels = h.forwards ? "  ·  " + t(SET.lang, "ssh_tunnel") + " " + h.forwards : "";
+    return {
+      name: h.alias, sub: target + tunnels, kind: "ssh", icon: "ssh",
+      host: h.alias, ms: p?.ms, pstate: p?.state,
+    };
+  });
+  rows.push(add);
+  return rows;
+}
+
+/* ============================ UPDATE ============================ */
+// Обновление в один шаг: фоновая проверка → строка-предложение в лаунчере →
+// Enter. Дальше без участия человека: качаем, процесс выходит, NSIS ставит
+// тихо (installMode "quiet") и сам поднимает уже новую версию (флаг /R).
+let PENDING: Update | null = null;
+let UPD: "" | "dl" | "install" = "";
+let UPD_PCT = 0;
+const UPD_EVERY = 6 * 60 * 60 * 1000; // как часто перепроверять, пока висим в трее
+
+async function checkUpdate() {
+  if (!SET.autoupdate || PENDING || UPD) return;
+  try {
+    const up = await check();
+    if (up) { PENDING = up; build(q.value); }
+  } catch { /* нет сети или релиза — обновление не срочное, молчим */ }
+}
+
+function updateEntry(lang: string): Entry {
+  const sub = UPD === "dl" ? t(lang, "upd_dl") + " " + UPD_PCT + "%"
+    : UPD === "install" ? t(lang, "upd_installing")
+    : t(lang, "upd_row_sub");
+  return {
+    name: "Nexalix Agora " + (PENDING?.version ?? ""),
+    sub, kind: "action", icon: "spark", update: true,
+    keywords: "update upgrade version обновить обновление версия апдейт",
+  };
+}
+
+async function runUpdate() {
+  if (!PENDING || UPD) return;
+  UPD = "dl"; UPD_PCT = 0; build(q.value);
+  let total = 0, got = 0;
+  try {
+    await PENDING.downloadAndInstall(ev => {
+      if (ev.event === "Started") total = ev.data.contentLength ?? 0;
+      else if (ev.event === "Progress") {
+        got += ev.data.chunkLength;
+        const pct = total ? Math.min(100, Math.round(got * 100 / total)) : 0;
+        if (pct !== UPD_PCT) { UPD_PCT = pct; build(q.value); } // перерисовка только на смене процента
+      } else if (ev.event === "Finished") { UPD = "install"; build(q.value); }
+    });
+    // Досюда на Windows не доходим: установщик уже запущен, процесс завершён.
+  } catch (e) {
+    UPD = ""; build(q.value);
+    toast(String(e));
+  }
+}
+
 /* ============================ RENDER (flat, quiet) ============================ */
+// Идентичность строки между перерисовками — чтобы асинхронные rebuild'ы
+// (цены/погода/3-сек рефетч процессов) не сбрасывали выделение на верх.
+// name в конце обязателен: у 2-3 строк погоды одинаковый copyText (summary),
+// без него findIndex схлопывал бы их в одну и выделение прыгало бы на первую.
+const entryKey = (o: Entry): string =>
+  o.kind + "|" + (o.host ?? o.pid ?? o.path ?? o.url ?? o.plan ?? o.actionId ?? "") + "|" + o.name;
+let lastBuiltQuery: string | null = null;
+
 function build(query: string) {
+  // Перерисовка того же запроса (долетели данные) — сохраняем активную строку.
+  const prevKey = query === lastBuiltQuery && items[active] ? entryKey(items[active].data) : null;
+  const prevIdx = active;
+  lastBuiltQuery = query;
+
   const rows: Entry[] = [];
   const calc = SET.plugins.calc ? tryCalc(query) : null;
   if (calc) rows.push(calc);
@@ -680,8 +945,11 @@ function build(query: string) {
 
   const clip = SET.plugins.clipboard ? clipMode(query) : [];
   const kill = SET.plugins.kill ? killMode(query) : [];
+  const ssh = SET.plugins.ssh ? sshMode(query) : [];
   if (!query.trim()) {
     // Пустой запрос — по умолчанию пустая панель, ничего не навязываем.
+    // Исключение — готовое обновление: предлагаем, не перебивая ввод.
+    if (PENDING) rows.push(updateEntry(SET.lang));
     // Недавние — только если включено в настройках (Show recent on open).
     if (SET.recent) rows.push(...FILES.slice(0, 6));
   } else if (clip.length) {
@@ -690,10 +958,17 @@ function build(query: string) {
   } else if (kill.length) {
     // Режим завершения процессов — эксклюзивный.
     rows.push(...kill);
+  } else if (ssh.length) {
+    // Режим SSH-хостов — эксклюзивный.
+    rows.push(...ssh);
   } else {
     // Явный движок по префиксу: "g: …", "c: …", "gpt: …" — главный intent.
     const pe = SET.plugins.web ? matchEnginePrefix(query) : null;
     if (pe) rows.push(webEntry(pe.engine, pe.text));
+
+    // Прямой путь/URL — тоже главный intent: «C:\…» открываем, не ищем в Google.
+    const direct = tryPath(query) ?? tryUrl(query);
+    if (direct) rows.push(direct);
 
     const acts = actionEntries(SET.lang);
     const pool: Entry[] = [
@@ -701,6 +976,8 @@ function build(query: string) {
       ...FILES, // недавние файлы всегда участвуют в поиске
       // Системные действия — при включённом syscmd; настройки доступны всегда.
       ...(SET.plugins.syscmd ? acts : acts.filter(a => a.actionId === "settings")),
+      ...(SET.plugins.syscmd ? planEntries(SET.lang) : []),
+      ...(PENDING ? [updateEntry(SET.lang)] : []),
     ];
     pool
       .map(o => ({ o, sc: scoreEntry(o, query) }))
@@ -725,9 +1002,15 @@ function build(query: string) {
     const cached = o.path ? iconCache.get(o.path) : undefined;
     const glyphInner = cached ? '<img alt="" src="' + cached + '">' : I[o.icon];
     const nameHtml = o.answer && o.eq ? esc(o.name) + " =" : o.answer ? esc(o.name) : highlight(o.name, query);
+    const sub = o.sub ? '<span class="tail">' + esc(o.sub) + '</span>' : '';
+    // Задержка до хоста — собственный слот: .tail видно только на активной
+    // строке, а доступность нужна сразу на всех.
+    const ping = o.kind === "ssh" ? pingView(o) : null;
     const tail = o.answer
       ? (o.display ? '<span class="answer-val">' + esc(o.display) + '</span>' : '')
-      : (o.sub ? '<span class="tail">' + esc(o.sub) + '</span>' : '');
+      : ping
+      ? sub + (ping.text ? '<span class="ping ' + ping.cls + '" dir="ltr">' + esc(ping.text) + '</span>' : '')
+      : sub;
     row.innerHTML = '<span class="glyph">' + glyphInner + '</span><span class="name">' + nameHtml + '</span>' + tail;
     row.addEventListener("mousemove", () => setActive(idx));
     row.addEventListener("click", () => { setActive(idx); run(o); });
@@ -738,7 +1021,12 @@ function build(query: string) {
       ensureIcon(o.path);
     }
   });
-  setActive(0);
+  if (prevKey !== null && items.length) {
+    const same = items.findIndex(it => entryKey(it.data) === prevKey);
+    setActive(same >= 0 ? same : Math.min(prevIdx, items.length - 1));
+  } else {
+    setActive(0);
+  }
   fitWindow();
 }
 
@@ -842,6 +1130,7 @@ async function hideAndReset() {
   await appWin?.hide().catch(() => {});
   q.value = "";
   histIdx = -1; // выход из режима истории: программная очистка не шлёт input
+  lastBuiltQuery = null; // скрытие ≠ «данные долетели»: выделение не воскрешаем
   build("");
 }
 
@@ -855,7 +1144,25 @@ async function run(o: Entry) {
     await hideAndReset();
     return;
   }
-  if (o.kind === "prochint") return; // строка-плейсхолдер загрузки списка
+  if (o.kind === "prochint" || o.kind === "sshhint") return; // строка-плейсхолдер
+  if (o.update) { await runUpdate(); return; } // окно не прячем: видно прогресс
+  if (o.plan) {
+    try {
+      await invoke("set_power_plan", { guid: o.plan });
+      PLANS = PLANS.map(p => ({ ...p, active: p.guid === o.plan }));
+      // Режим ПК считается по активной схеме — перечитываем, а не гадаем.
+      try { PC_MODE = await invoke<string>("pc_mode"); } catch { PC_MODE = ""; }
+      build(q.value);
+      toast(t(SET.lang, "act_g_plan") + "  " + o.name);
+    } catch (e) { toast(String(e)); }
+    return;
+  }
+  if (o.kind === "ssh" && o.host) {
+    try { await invoke("ssh_open", { alias: o.host, shell: SET.sshShell, profile: SET.sshProfile }); }
+    catch (e) { toast(String(e)); return; } // терминал не поднялся — строка остаётся
+    await hideAndReset();
+    return;
+  }
   if (o.kind === "proc" && o.pid != null) {
     try {
       await invoke("kill_process", { pid: o.pid });
@@ -877,7 +1184,13 @@ async function run(o: Entry) {
       await invoke("open_url", { url: o.url });
     } else if (o.actionId) {
       const msg = await invoke<string>("run_action", { id: o.actionId });
-      if (o.actionId === "dark_mode" || o.actionId === "empty_trash") {
+      if (o.actionId === "game_mode" || o.actionId === "work_mode") {
+        // Режим переключён — сразу отражаем это в списке, не дожидаясь refreshCatalog.
+        PC_MODE = o.actionId === "game_mode" ? "game" : "work";
+        build(q.value);
+      }
+      if (o.actionId === "dark_mode" || o.actionId === "empty_trash"
+          || o.actionId === "game_mode" || o.actionId === "work_mode") {
         toast(msg);
         return; // остаёмся видимыми, показываем результат
       }
@@ -892,8 +1205,9 @@ async function run(o: Entry) {
 
 /* ============================ HISTORY ============================ */
 // История запросов в localStorage (последние 50, новые в конце). Листается
-// стрелками ↑/↓ только когда панель пуста (пустой ввод, нет строк) — навигацию
-// по результатам не ломает. Любой ввод символа выходит из режима истории.
+// стрелкой ↑ при пустом вводе с верхней строки (или пустой панели) — навигацию
+// по результатам не ломает, а при включённых «недавних» остаётся достижимой.
+// Любой ввод символа выходит из режима истории.
 const HIST_KEY = "agora.hist";
 const HIST_MAX = 50;
 let histIdx = -1;   // -1 = не листаем; иначе индекс в массиве истории
@@ -928,7 +1242,7 @@ q.addEventListener("keydown", (e) => {
   }
   else if (e.key === "ArrowUp") {
     e.preventDefault();
-    const canHist = histIdx >= 0 || (q.value === "" && items.length === 0);
+    const canHist = histIdx >= 0 || (q.value === "" && (items.length === 0 || active === 0));
     const h = canHist ? loadHist() : [];
     if (canHist && h.length) {
       if (histIdx < 0) { histDraft = q.value; histIdx = h.length; }
@@ -960,6 +1274,9 @@ listen("focus-input", () => {
   q.focus();
   q.select();
   histIdx = -1; // новый вызов лаунчера — история с начала
+  lastBuiltQuery = null; // свежее открытие всегда стартует с верхней строки
+  hostsT = 0; // конфиг могли поправить снаружи — перечитываем при показе
+  pingT = 0;  // и доступность меряем заново, а не показываем прошлогоднюю
   refreshCatalog();
 });
 
@@ -1006,4 +1323,9 @@ if (demoLang || demoQ || demo.has("demo")) {
 }
 build(demoQ);
 q.focus();
-if (!demo.has("demo") && !demoQ) refreshCatalog();
+if (!demo.has("demo") && !demoQ) {
+  refreshCatalog();
+  // Не на старте: сеть при логине занята, а обновление подождёт.
+  setTimeout(checkUpdate, 15_000);
+  setInterval(checkUpdate, UPD_EVERY);
+}

@@ -29,7 +29,42 @@ rules below are load-bearing; follow them exactly.
   clean. No `unwrap`/`expect`/`panic!` on runtime paths (`[lints]` enforces).
 - Frontend (`src/`): `pnpm build` (runs `tsc`) clean. Vanilla TS, no
   framework. User strings via `src/i18n.ts` (EN = source of truth).
-- Verify features in the real app before claiming done.
+- **There are no tests in this repo** — `tsc` and `clippy` are compile
+  gates, not verification. "Done" means the feature was driven in the
+  running app (`pnpm tauri dev`, or the `run` skill). Never claim a
+  feature works because it compiles.
+
+## Build & run
+
+- **pnpm only** — never `npm i`/`yarn` here. `pnpm dev` (vite),
+  `pnpm build` (tsc + vite), `pnpm tauri dev`, `pnpm tauri build`.
+- Do not delete `.npmrc` (`verify-deps-before-run=false`) or
+  `pnpm-workspace.yaml` (`allowBuilds: esbuild`). pnpm 11 replaced
+  `onlyBuiltDependencies` with `allowBuilds`; without them every
+  `pnpm <script>` dies on `ERR_PNPM_IGNORED_BUILDS`.
+- `pnpm tauri build` needs an MSVC toolchain (`link.exe` on PATH) and
+  downloads NSIS into `%LOCALAPPDATA%\tauri\NSIS` — on a flaky network
+  fetch `nsis-3.11.zip` manually and unpack it there.
+- **Expected failure:** without the signing key (`~/.tauri/agora.key`)
+  the build ends with `no private key` **after** the installer is
+  already written to
+  `src-tauri/target/release/bundle/nsis/Nexalix Agora_<ver>_x64-setup.exe`.
+  That is not a broken build. **Never generate a new key** — it breaks
+  the updater's published pubkey.
+
+## i18n
+
+- `src/i18n.ts`: the `EN` object types every key; the other 16 languages
+  are partial and fall back to EN. A new string lands in EN (required)
+  and RU in the same commit; other locales are best-effort.
+- RTL locales are `ar` and `fa` — both windows flip `direction`, so
+  check any layout change against one of them.
+
+## Repo hygiene
+
+- Keep the root clean: no build artifacts, no installers, no keys, no
+  stray tooling scripts. If something like that appears untracked,
+  delete it or gitignore it — do not commit it.
 
 ## Skills — use by priority
 
@@ -37,6 +72,11 @@ Load/run these as part of normal work on this repo, in this order of
 importance. Higher tiers are not optional.
 
 1. **Always, on every change:**
+   - `codebase-memory` — this repo is indexed as
+     `A-workSpace-nexalix-agora`. Explore through the graph
+     (`search_graph`, `trace_path`, `get_architecture`,
+     `get_code_snippet`) before grep/Glob; `Grep` only for known literal
+     strings. Run `detect_changes` after edits to keep the index fresh.
    - `rust-clean-code` — before writing/reviewing any `src-tauri/` Rust.
    - `karpathy-guidelines` — surgical, minimal edits; don't "improve"
      neighbouring code.

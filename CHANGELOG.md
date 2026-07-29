@@ -8,6 +8,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md#versioning) for the release rules.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-07-29
+
 ### Added
 - Converters plugin: type a conversion straight into the bar.
   - Units — length, mass, volume, area, speed, duration, digital storage
@@ -34,6 +36,58 @@ See [CONTRIBUTING.md](CONTRIBUTING.md#versioning) for the release rules.
   system processes are hidden and refused (checked with `IsProcessCritical`)
   so you can't blue-screen the machine even when running elevated; Agora's
   own processes are excluded too.
+- PC mode actions: type `game` (or `игра`) to switch the machine into a
+  gaming profile — Windows Game Mode on and notifications silenced (a
+  Do-Not-Disturb equivalent). Type `work` (or `работа`) to switch back —
+  Game Mode off, notifications restored. All toggles are reversible and
+  need no admin rights (`powercfg` plus `HKCU`).
+  Power plans are picked by name: your own schemes named `GAME` / `WORK`
+  win, falling back to Windows' High Performance / Balanced. Machines
+  where the stock schemes were removed keep working, and a custom plan
+  stays in charge of what each mode actually does.
+  The active mode is marked right in the results (`PC mode · on`), read
+  from the live power scheme, and updates the moment you switch.
+
+- SSH plugin: type `ssh` for the hosts in your `~/.ssh/config`, each with a
+  live reachability check. The indicator is a TCP connect to that host's real
+  SSH port, so it answers the question that matters — can I connect right
+  now — and it reads the SSH banner before closing, which keeps `sshd` from
+  logging a failed connection for every check. Add a name to filter
+  (`ssh prod`); Enter opens a Windows Terminal tab already connected, titled
+  with the alias. Hosts with `LocalForward` are marked as carrying tunnels.
+  Probes only ever touch the hosts currently on screen, on demand.
+  New hosts can be added from Settings → SSH: Agora appends a marked block to
+  the end of your config and never rewrites what is already there, so hosts
+  work in every other ssh client too. Only blocks Agora added itself can be
+  removed from the UI; hand-written ones are shown read-only.
+  Sessions open in whatever you actually use: Settings → SSH lets you pick
+  between running `ssh` directly (the tab closes when you disconnect) or
+  inside PowerShell, PowerShell 7 or cmd (the shell stays open afterwards),
+  and which Windows Terminal profile the tab uses — the list is read from
+  Terminal's own settings, so the session gets your usual colours, font and
+  background instead of the default profile.
+  Authentication is keys and `ssh-agent` only — stock Windows OpenSSH cannot
+  accept a password non-interactively, so password hosts simply prompt in the
+  terminal that opens, as usual.
+- Power plans in the launcher: every scheme from `powercfg.cpl` — the
+  Windows ones and your own — is now a result. Type a plan name (or
+  `power`, `схема`, `питание`) and press Enter to make it active; the
+  current one is marked. Unlike the PC mode actions, picking a plan only
+  switches power — Game Mode and notifications stay as they are. The PC
+  mode actions themselves got their own switch in Settings → Plugins, so
+  you can keep the bare Windows plans and nothing else.
+
+### Changed
+- Updates now ask first, like a messenger: Agora checks in the
+  background (on start and every 6 h) and, when a version is out, offers
+  a single row in the launcher. Enter downloads it with a percentage in
+  the row, then the app closes, installs silently and comes back on the
+  new version — no installer wizard, nothing to click. Previously the
+  update was downloaded and installed unannounced at startup.
+- Power schemes are read through the `powrprof` API instead of parsing
+  `powercfg /list`: scheme names come back correct in any Windows
+  locale (console output is OEM-encoded and unreadable), and switching
+  no longer spawns a console process.
 
 ### Fixed
 - Launcher now opens on the monitor under the mouse cursor, not always the
@@ -99,7 +153,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md#versioning) for the release rules.
   system actions, calculator, web fallback), settings window, 17
   interface languages, tray, autostart, signed auto-updates.
 
-[Unreleased]: https://github.com/Nexalix-Labs/agora/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Nexalix-Labs/agora/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/Nexalix-Labs/agora/releases/tag/v0.8.0
 [0.7.0]: https://github.com/Nexalix-Labs/agora/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Nexalix-Labs/agora/releases/tag/v0.6.0
 [0.5.1]: https://github.com/Nexalix-Labs/agora/releases/tag/v0.5.1

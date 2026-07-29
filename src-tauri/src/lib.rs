@@ -5,6 +5,9 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+/// SSH-плагин: хосты из ssh_config, проба доступности, запуск терминала.
+mod ssh;
+
 #[derive(Serialize, Clone)]
 struct Entry {
     name: String,
@@ -51,7 +54,7 @@ impl Drop for ComGuard {
 fn index_apps() -> Vec<Entry> {
     match enum_apps_folder() {
         Ok(mut v) => {
-            v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            v.sort_by_key(|e| e.name.to_lowercase());
             v
         }
         Err(_) => Vec::new(),
@@ -162,7 +165,7 @@ fn recent_files() -> Vec<Entry> {
             ));
         }
     }
-    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v.sort_by_key(|x| std::cmp::Reverse(x.0));
     v.into_iter().take(6).map(|(_, e)| e).collect()
 }
 
@@ -456,10 +459,285 @@ fn run_action(app: AppHandle, id: String) -> Result<String, String> {
             }
             .into())
         }
+        "game_mode" => set_pc_mode(true),
+        "work_mode" => set_pc_mode(false),
         _ => Err(format!("unknown action: {id}")),
     }
     #[cfg(not(windows))]
     Err("only windows".into())
+}
+
+#[cfg(windows)]
+use windows::core::GUID;
+#[cfg(windows)]
+use windows::Win32::Foundation::ERROR_SUCCESS;
+#[cfg(windows)]
+use windows::Win32::System::Registry::HKEY;
+
+/// Схемы питания читаем через powrprof, а не парсингом `powercfg /list`:
+/// имена схем локализованы и приходят в OEM-кодировке консоли — из вывода их
+/// не собрать. Заодно не мигает окно консоли. Все вызовы идут в HKEY текущего
+/// пользователя, а это NULL.
+#[cfg(windows)]
+const NO_HKEY: HKEY = HKEY(std::ptr::null_mut());
+
+/// Стандартные схемы Windows — фолбэк, если своих GAME/WORK нет.
+#[cfg(windows)]
+const STD_HIGH_PERF: GUID = GUID::from_u128(0x8c5e_7fda_e8bf_4a96_9a85_a6e2_3a8c_635c);
+#[cfg(windows)]
+const STD_BALANCED: GUID = GUID::from_u128(0x381b_4222_f694_41f0_9685_ff5b_b260_df2e);
+
+/// Отображаемое имя схемы (UTF-16 из powrprof). Пусто, если API его не отдал.
+#[cfg(windows)]
+fn scheme_name(guid: &GUID) -> String {
+    use windows::Win32::System::Power::PowerReadFriendlyName;
+
+    // Первый вызов с пустым буфером — узнать нужный размер в байтах.
+    let mut size: u32 = 0;
+    if unsafe { PowerReadFriendlyName(NO_HKEY, Some(guid), None, None, None, &mut size) }
+        != ERROR_SUCCESS
+    {
+        return String::new();
+    }
+    let mut buf = vec![0u8; size as usize];
+    if unsafe {
+        PowerReadFriendlyName(
+            NO_HKEY,
+            Some(guid),
+            None,
+            None,
+            Some(buf.as_mut_ptr()),
+            &mut size,
+        )
+    } != ERROR_SUCCESS
+    {
+        return String::new();
+    }
+    let utf16: Vec<u16> = buf
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|&c| c != 0)
+        .collect();
+    String::from_utf16_lossy(&utf16)
+}
+
+/// Все схемы питания системы: [(guid, имя)] в порядке `powercfg /list`.
+#[cfg(windows)]
+fn power_schemes() -> Vec<(GUID, String)> {
+    use windows::Win32::System::Power::{PowerEnumerate, ACCESS_SCHEME};
+
+    let mut v = Vec::new();
+    let mut index = 0u32;
+    loop {
+        let mut guid = GUID::from_u128(0);
+        let mut size = std::mem::size_of::<GUID>() as u32;
+        let rc = unsafe {
+            PowerEnumerate(
+                NO_HKEY,
+                None,
+                None,
+                ACCESS_SCHEME,
+                index,
+                Some(std::ptr::from_mut(&mut guid).cast::<u8>()),
+                &mut size,
+            )
+        };
+        // Конец списка (ERROR_NO_MORE_ITEMS) или ошибка — дальше не идём.
+        if rc != ERROR_SUCCESS {
+            return v;
+        }
+        let name = scheme_name(&guid);
+        v.push((guid, name));
+        index += 1;
+    }
+}
+
+/// GUID активной схемы питания.
+#[cfg(windows)]
+fn active_scheme() -> Option<GUID> {
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::System::Power::PowerGetActiveScheme;
+
+    let mut p: *mut GUID = std::ptr::null_mut();
+    if unsafe { PowerGetActiveScheme(NO_HKEY, &mut p) } != ERROR_SUCCESS || p.is_null() {
+        return None;
+    }
+    let guid = unsafe { *p };
+    // Буфер выделен системой через LocalAlloc — освобождаем его.
+    let _ = unsafe { LocalFree(HLOCAL(p.cast())) };
+    Some(guid)
+}
+
+/// Канонический `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` — в таком виде GUID
+/// уходит на фронт.
+#[cfg(windows)]
+fn guid_str(g: &GUID) -> String {
+    let d = g.data4;
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        g.data1, g.data2, g.data3, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]
+    )
+}
+
+/// Обратный разбор: всё, что пришло с фронта, попадает в Win32 только отсюда.
+#[cfg(windows)]
+fn parse_guid(s: &str) -> Option<GUID> {
+    let b = s.as_bytes();
+    if b.len() != 36 || [8, 13, 18, 23].iter().any(|&i| b[i] != b'-') {
+        return None;
+    }
+    let hex: String = s.chars().filter(|c| *c != '-').collect();
+    if hex.len() != 32 || !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    u128::from_str_radix(&hex, 16).ok().map(GUID::from_u128)
+}
+
+/// Схема под режим: сперва пользовательская с именем GAME/WORK, иначе
+/// стандартная Windows. На машинах, где стандартные схемы удалены,
+/// работает только первый путь — поэтому имя приоритетнее.
+#[cfg(windows)]
+fn scheme_for(game: bool) -> Option<GUID> {
+    let want = if game { "GAME" } else { "WORK" };
+    let schemes = power_schemes();
+    if let Some((g, _)) = schemes.iter().find(|(_, n)| n.eq_ignore_ascii_case(want)) {
+        return Some(*g);
+    }
+    let std_guid = if game { STD_HIGH_PERF } else { STD_BALANCED };
+    schemes
+        .iter()
+        .find(|(g, _)| *g == std_guid)
+        .map(|(g, _)| *g)
+}
+
+/// Какой режим ПК активен сейчас: `game` | `work` | `""` (ни то, ни другое).
+/// Определяем по активной схеме питания — она же главный переключатель режима.
+#[cfg(windows)]
+#[tauri::command]
+fn pc_mode() -> String {
+    let Some(active) = active_scheme() else {
+        return String::new();
+    };
+    if let Some((_, name)) = power_schemes().iter().find(|(g, _)| *g == active) {
+        if name.eq_ignore_ascii_case("GAME") {
+            return "game".into();
+        }
+        if name.eq_ignore_ascii_case("WORK") {
+            return "work".into();
+        }
+    }
+    if active == STD_HIGH_PERF {
+        "game".into()
+    } else if active == STD_BALANCED {
+        "work".into()
+    } else {
+        String::new()
+    }
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn pc_mode() -> String {
+    String::new()
+}
+
+/// Схема питания для списка в лаунчере.
+#[derive(Serialize)]
+struct PowerPlan {
+    guid: String,
+    name: String,
+    active: bool,
+}
+
+/// Все схемы из системы (те же, что в `powercfg.cpl`) — для выбора в лаунчере.
+/// GAME/WORK тоже отдаём: как схемы они переключают только питание, а действия
+/// «игровой/рабочий режим» вдобавок трогают Game Mode и уведомления.
+#[cfg(windows)]
+#[tauri::command]
+fn power_plans() -> Vec<PowerPlan> {
+    let active = active_scheme();
+    power_schemes()
+        .into_iter()
+        .filter(|(_, name)| !name.is_empty())
+        .map(|(g, name)| PowerPlan {
+            guid: guid_str(&g),
+            name,
+            active: active == Some(g),
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn power_plans() -> Vec<PowerPlan> {
+    Vec::new()
+}
+
+/// Сделать схему активной.
+#[cfg(windows)]
+#[tauri::command]
+fn set_power_plan(guid: String) -> Result<(), String> {
+    use windows::Win32::System::Power::PowerSetActiveScheme;
+
+    let g = parse_guid(&guid).ok_or("bad guid")?;
+    let rc = unsafe { PowerSetActiveScheme(NO_HKEY, Some(&g)) };
+    if rc == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(format!("powrprof: {}", rc.0))
+    }
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn set_power_plan(_guid: String) -> Result<(), String> {
+    Err("only windows".into())
+}
+
+/// Игровой/рабочий режим ПК. Три обратимых переключателя:
+/// схема питания, Windows Game Mode, тихие уведомления (аналог «Не беспокоить»).
+/// `game=true` — максимум производительности и тишина; `false` — сбалансированно.
+#[cfg(windows)]
+fn set_pc_mode(game: bool) -> Result<String, String> {
+    use windows::Win32::System::Power::PowerSetActiveScheme;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE};
+    use winreg::RegKey;
+
+    // 1) Схема питания: сперва своя GAME/WORK, иначе стандартная Windows.
+    // Если ни той, ни другой нет — питание не трогаем, остальное применяем.
+    if let Some(scheme) = scheme_for(game) {
+        let rc = unsafe { PowerSetActiveScheme(NO_HKEY, Some(&scheme)) };
+        if rc != ERROR_SUCCESS {
+            return Err(format!("powrprof: {}", rc.0));
+        }
+    }
+
+    // Запись DWORD в HKCU: открываем на KEY_WRITE (у системных ключей вроде
+    // PushNotifications KEY_ALL_ACCESS из create_subkey запрещён), ключ создаём
+    // только если его ещё нет.
+    let set_dword = |path: &str, name: &str, val: u32| {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let key = hkcu
+            .open_subkey_with_flags(path, KEY_WRITE)
+            .or_else(|_| hkcu.create_subkey(path).map(|(k, _)| k));
+        if let Ok(k) = key {
+            let _ = k.set_value(name, &val);
+        }
+    };
+    let flag = u32::from(game);
+
+    // 2) Windows Game Mode.
+    set_dword(r"Software\Microsoft\GameBar", "AutoGameModeEnabled", flag);
+    set_dword(r"Software\Microsoft\GameBar", "AllowAutoGameMode", flag);
+
+    // 3) «Не беспокоить»: гасим всплывающие уведомления в игре, возвращаем в работе.
+    set_dword(
+        r"Software\Microsoft\Windows\CurrentVersion\PushNotifications",
+        "ToastEnabled",
+        u32::from(!game),
+    );
+
+    Ok(if game { "Game mode on" } else { "Work mode on" }.into())
 }
 
 /// Сообщаем оболочке о смене темы, иначе часть приложений не подхватит.
@@ -516,8 +794,7 @@ fn get_settings(state: State<'_, SettingsState>) -> serde_json::Value {
     state
         .0
         .lock()
-        .map(|v| v.clone())
-        .unwrap_or(serde_json::Value::Null)
+        .map_or(serde_json::Value::Null, |v| v.clone())
 }
 
 #[tauri::command]
@@ -528,7 +805,21 @@ fn set_settings(
 ) -> Result<(), String> {
     #[cfg(desktop)]
     {
-        apply_hotkeys(&app, &value)?;
+        if let Err(e) = apply_hotkeys(&app, &value) {
+            // Ошибка регистрации могла оставить хоткеи частично снятыми —
+            // возвращаем прежний набор, чтобы вызов лаунчера не умер.
+            let prev = state
+                .0
+                .lock()
+                .map_or_else(|_| serde_json::json!({}), |v| v.clone());
+            if apply_hotkeys(&app, &prev).is_err() {
+                // Прежний набор тоже не регистрируется (например, его хоткей
+                // занят другим приложением) — не оставляем ноль хоткеев,
+                // поднимаем дефолтный Alt+Space.
+                let _ = apply_hotkeys(&app, &serde_json::json!({}));
+            }
+            return Err(e);
+        }
         let tray_on = value
             .get("tray")
             .and_then(serde_json::Value::as_bool)
@@ -882,7 +1173,7 @@ fn list_processes() -> Vec<ProcInfo> {
         let _ = CloseHandle(snap);
     }
     // Крупные потребители памяти — сверху (их чаще и «килляют»).
-    out.sort_by(|a, b| b.mem.cmp(&a.mem));
+    out.sort_by_key(|b| std::cmp::Reverse(b.mem));
     out
 }
 
@@ -909,6 +1200,21 @@ fn proc_working_set(pid: u32) -> u64 {
     }
 }
 
+/// Имя exe-файла процесса по открытому хэндлу (QueryFullProcessImageNameW).
+#[cfg(windows)]
+fn image_file_name(h: windows::Win32::Foundation::HANDLE) -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_WIN32};
+
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    // SAFETY: буфер валиден, len — его ёмкость; API пишет не больше len UTF-16 юнитов.
+    unsafe { QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len) }
+        .ok()?;
+    let full = String::from_utf16_lossy(&buf[..len as usize]);
+    full.rsplit(['\\', '/']).next().map(str::to_string)
+}
+
 #[cfg(windows)]
 #[tauri::command]
 fn kill_process(pid: u32) -> Result<(), String> {
@@ -932,6 +1238,13 @@ fn kill_process(pid: u32) -> Result<(), String> {
             }
             Err(e) => return Err(e.message()),
         };
+        // Денилист имён повторно, уже по pid из IPC (list_processes фильтрует
+        // только выдачу): под админом IsProcessCritical не флагает lsass/services,
+        // а их завершение форсит перезагрузку системы.
+        if image_file_name(h).is_some_and(|n| is_critical_name(&n)) {
+            let _ = CloseHandle(h);
+            return Err("Критический системный процесс — завершение запрещено".into());
+        }
         // Критический процесс (ProcessBreakOnTermination) — завершение = BSOD.
         // Второй барьер к денилисту имён: отказываем даже под админом.
         let mut crit = BOOL::default();
@@ -967,29 +1280,21 @@ fn run_bind_target(target: &str) -> Result<(), String> {
 }
 
 /// (Пере)регистрация ВСЕХ глобальных хоткеев: вызов лаунчера + свои бинды
-/// из настроек. Снимает прежние; ошибка любого — откат всей записи настроек.
+/// из настроек. Сначала парсит всё (битый хоткей не снимает работающие),
+/// только потом перерегистрирует; ошибку регистрации откатывает set_settings.
 #[cfg(desktop)]
 fn apply_hotkeys(app: &AppHandle, settings: &serde_json::Value) -> Result<(), String> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
-
-    let gs = app.global_shortcut();
-    let _ = gs.unregister_all();
 
     let hk = settings
         .get("hotkey")
         .and_then(|v| v.as_str())
         .unwrap_or(DEFAULT_HOTKEY);
-    let sc: Shortcut = hk
+    let main_sc: Shortcut = hk
         .parse()
         .map_err(|e| format!("Bad hotkey '{hk}': {e:?}"))?;
-    let handle = app.clone();
-    gs.on_shortcut(sc, move |_app, _sc, event| {
-        if event.state() == ShortcutState::Pressed {
-            toggle_window(&handle);
-        }
-    })
-    .map_err(|e| e.to_string())?;
 
+    let mut bind_scs: Vec<(Shortcut, String, String)> = Vec::new();
     if let Some(binds) = settings.get("binds").and_then(|v| v.as_array()) {
         for b in binds {
             let (Some(hk), Some(target)) = (
@@ -1002,14 +1307,28 @@ fn apply_hotkeys(app: &AppHandle, settings: &serde_json::Value) -> Result<(), St
             let sc: Shortcut = hk
                 .parse()
                 .map_err(|e| format!("'{name}': bad hotkey '{hk}': {e:?}"))?;
-            let target = target.to_string();
-            gs.on_shortcut(sc, move |_app, _sc, event| {
-                if event.state() == ShortcutState::Pressed {
-                    let _ = run_bind_target(&target);
-                }
-            })
-            .map_err(|e| format!("'{name}': {e}"))?;
+            bind_scs.push((sc, name.to_string(), target.to_string()));
         }
+    }
+
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+
+    let handle = app.clone();
+    gs.on_shortcut(main_sc, move |_app, _sc, event| {
+        if event.state() == ShortcutState::Pressed {
+            toggle_window(&handle);
+        }
+    })
+    .map_err(|e| e.to_string())?;
+
+    for (sc, name, target) in bind_scs {
+        gs.on_shortcut(sc, move |_app, _sc, event| {
+            if event.state() == ShortcutState::Pressed {
+                let _ = run_bind_target(&target);
+            }
+        })
+        .map_err(|e| format!("'{name}': {e}"))?;
     }
     Ok(())
 }
@@ -1214,6 +1533,13 @@ fn build_tray(app: &AppHandle, lang: &str) -> tauri::Result<()> {
 )]
 pub fn run() {
     tauri::Builder::default()
+        // Первым: повторный запуск exe не плодит второй трей/watcher,
+        // а показывает лаунчер уже работающего экземпляра. Колбэк может
+        // прилететь до создания окна «main» (WebView2 качает сообщения при
+        // старте) — show_window тогда тихий no-op, это осознанно.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_window(app);
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_autostart::init(
@@ -1229,12 +1555,23 @@ pub fn run() {
             open_path,
             open_url,
             run_action,
+            pc_mode,
+            power_plans,
+            set_power_plan,
             get_settings,
             set_settings,
             clipboard_history,
             set_clipboard,
             list_processes,
             kill_process,
+            ssh::ssh_hosts,
+            ssh::ssh_probe,
+            ssh::ssh_client_present,
+            ssh::ssh_wt_profiles,
+            ssh::ssh_open,
+            ssh::ssh_add_host,
+            ssh::ssh_remove_host,
+            ssh::ssh_keys,
             quit
         ])
         .setup(|app| {
@@ -1255,36 +1592,27 @@ pub fn run() {
                     .and_then(|v| v.as_str())
                     .unwrap_or("en")
                     .to_string();
-                let autoupdate = initial
-                    .get("autoupdate")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(true);
-
+                let mut initial = initial;
                 if let Err(e) = apply_hotkeys(app.handle(), &initial) {
                     // Хоткей занят/битый — пробуем дефолты, иначе живём через трей.
                     eprintln!("nexalix-agora: {e}");
-                    let _ = apply_hotkeys(app.handle(), &serde_json::json!({}));
+                    if apply_hotkeys(app.handle(), &serde_json::json!({})).is_ok() {
+                        // Состояние должно отражать реально активный хоткей —
+                        // иначе любой set_settings перерегистрирует битый и
+                        // снесёт работающий дефолтный.
+                        if let Some(o) = initial.as_object_mut() {
+                            o.insert("hotkey".into(), DEFAULT_HOTKEY.into());
+                        }
+                    }
                 }
                 app.manage(SettingsState(Mutex::new(initial)));
 
                 // Фоновый наблюдатель за буфером обмена (история копирований).
                 spawn_clipboard_watcher(app.handle().clone());
 
-                // Тихая проверка обновлений при старте. NSIS ставится silent,
-                // приложение перезапускается установщиком. Ошибки глотаем —
-                // нет сети/релиза ещё нет — не повод шуметь.
-                if autoupdate {
-                    let handle = app.handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        use tauri_plugin_updater::UpdaterExt;
-                        let Ok(updater) = handle.updater() else {
-                            return;
-                        };
-                        if let Ok(Some(update)) = updater.check().await {
-                            let _ = update.download_and_install(|_, _| {}, || {}).await;
-                        }
-                    });
-                }
+                // Обновления не ставим за спиной у пользователя: фоновой
+                // проверкой и предложением занимается лаунчер (main.ts), а
+                // установку запускает уже подтверждение — см. UPDATE там.
 
                 // Автозапуск включаем по умолчанию только при первом запуске.
                 if let Ok(dir) = app.path().app_config_dir() {

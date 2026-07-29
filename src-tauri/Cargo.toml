@@ -1,6 +1,6 @@
 [package]
 name = "nexalix-agora"
-version = "0.7.0"
+version = "0.8.0"
 description = "Nexalix Agora"
 authors = ["blyss"]
 edition = "2021"
@@ -20,6 +20,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
@@ -33,6 +34,7 @@ windows = { version = "0.58", features = [
   "Win32_Storage_FileSystem",
   "Win32_System_Com",
   "Win32_System_Power",
+  "Win32_System_Registry",
   "Win32_System_Shutdown",
   "Win32_System_DataExchange",
   "Win32_System_Memory",
