@@ -17,12 +17,13 @@ interface Settings {
   blur: boolean;
   recent: boolean;
   autoupdate: boolean;
-  channel: string;
   wxCity: string;
   wxLoc: { lat: number; lon: number; city: string } | null;
   webEngine: string;
+  sshShell: string;   // direct | powershell | pwsh | cmd
+  sshProfile: string; // профиль Windows Terminal (пусто — по умолчанию)
   binds: Bind[];
-  plugins: { calc: boolean; syscmd: boolean; web: boolean; crypto: boolean; weather: boolean };
+  plugins: { calc: boolean; syscmd: boolean; pcmode: boolean; web: boolean; crypto: boolean; weather: boolean; convert: boolean; clipboard: boolean; kill: boolean; ssh: boolean };
 }
 interface Bind {
   name: string;
@@ -33,9 +34,9 @@ interface Bind {
 }
 const DEF: Settings = {
   lang: resolveLang(), hotkey: "Alt+Space", tray: true, theme: "dark", accent: "#0098EA",
-  density: "cozy", blur: true, recent: false, autoupdate: true, channel: "stable", wxCity: "", wxLoc: null,
-  webEngine: "google", binds: [],
-  plugins: { calc: true, syscmd: true, web: true, crypto: true, weather: true },
+  density: "cozy", blur: true, recent: false, autoupdate: true, wxCity: "", wxLoc: null,
+  webEngine: "google", sshShell: "direct", sshProfile: "", binds: [],
+  plugins: { calc: true, syscmd: true, pcmode: true, web: true, crypto: true, weather: true, convert: true, clipboard: true, kill: true, ssh: true },
 };
 let S: Settings = { ...DEF, plugins: { ...DEF.plugins } };
 
@@ -74,6 +75,7 @@ $$(".navitem").forEach(it => it.addEventListener("click", () => {
   $$(".navitem").forEach(n => n.classList.toggle("active", n === it));
   $$(".pane").forEach(pane => pane.classList.toggle("active", pane.dataset.pane === p));
   $("#content").scrollTop = 0;
+  if (p === "ssh") renderSsh(); // конфиг могли поправить снаружи
 }));
 
 /* ============ I18N ============ */
@@ -89,6 +91,8 @@ function applyI18n() {
   $("#aboutVer").textContent = T("ver_word") + " " + version + " · Windows";
   renderPlugins();
   renderBinds();
+  renderSsh();
+  renderSshProfiles();
 }
 
 /* ============ THEME / ACCENT (live, в самом окне настроек) ============ */
@@ -112,7 +116,7 @@ function syncControls() {
     sw.classList.toggle("on", !!S[key]);
   });
   $$("[data-seg]").forEach(seg => {
-    const grp = seg.dataset.seg as "channel" | "theme" | "density";
+    const grp = seg.dataset.seg as "theme" | "density" | "sshShell";
     const val = S[grp];
     seg.querySelectorAll<HTMLElement>(".seg").forEach(s => s.classList.toggle("active", s.dataset.val === val));
   });
@@ -188,12 +192,12 @@ $$(".switch[data-key]").forEach(sw => {
 });
 
 $$("[data-seg]").forEach(seg => {
-  const grp = seg.dataset.seg as "channel" | "theme" | "density";
+  const grp = seg.dataset.seg as "theme" | "density" | "sshShell";
   seg.querySelectorAll<HTMLElement>(".seg").forEach(s => s.addEventListener("click", () => {
     const val = s.dataset.val ?? "";
     if (grp === "theme") S.theme = val as Settings["theme"];
-    else if (grp === "density") S.density = val as Settings["density"];
-    else S.channel = val;
+    else if (grp === "sshShell") S.sshShell = val;
+    else S.density = val as Settings["density"];
     seg.querySelectorAll<HTMLElement>(".seg").forEach(x => x.classList.toggle("active", x === s));
     if (grp === "theme") applyTheme();
     saveQuiet();
@@ -573,6 +577,9 @@ $("#bindSave").addEventListener("click", () => {
     renderBinds();
   }).catch(err => {
     S.binds.pop();
+    // Пересохранить откат: иначе хоткеи (включая вызов лаунчера) останутся
+    // снятыми до следующего успешного сохранения.
+    saveQuiet();
     toast(String(err));
   });
 });
@@ -617,8 +624,18 @@ const PLUGINS: { id: PluginId | null; nm: Key; ds: Key; raw: string }[] = [
     raw: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/>' },
   { id: "calc", nm: "p_calc_nm", ds: "p_calc_ds",
     raw: '<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M8 6h8M8 12h.01M12 12h.01M16 12h.01M8 16h.01M12 16h.01M16 16h.01"/>' },
+  { id: "convert", nm: "p_conv_nm", ds: "p_conv_ds",
+    raw: '<path d="M7 16V4M7 4 3 8M7 4l4 4"/><path d="M17 8v12M17 20l4-4M17 20l-4-4"/>' },
+  { id: "clipboard", nm: "p_clip_nm", ds: "p_clip_ds",
+    raw: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>' },
+  { id: "kill", nm: "p_kill_nm", ds: "p_kill_ds",
+    raw: '<rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>' },
+  { id: "ssh", nm: "p_ssh_nm", ds: "p_ssh_ds",
+    raw: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 9.5l2.5 2.5L7 14.5M12.5 15H17"/>' },
   { id: "syscmd", nm: "p_sys_nm", ds: "p_sys_ds",
     raw: '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>' },
+  { id: "pcmode", nm: "p_mode_nm", ds: "p_mode_ds",
+    raw: '<path d="M6 12h4M8 10v4M15 13h.01M18 11h.01"/><rect x="2" y="6" width="20" height="12" rx="4"/>' },
   { id: "crypto", nm: "p_crypto_nm", ds: "p_crypto_ds",
     raw: '<circle cx="12" cy="12" r="9"/><path d="M14.8 9.2c-.5-.8-1.5-1.4-2.8-1.4-1.7 0-2.8.9-2.8 2.1 0 2.8 5.8 1.4 5.8 4.2 0 1.2-1.1 2.1-3 2.1-1.4 0-2.5-.6-3-1.5M12 5.8v1.9M12 16.3v1.9"/>' },
   { id: "weather", nm: "p_wx_nm", ds: "p_wx_ds",
@@ -648,6 +665,122 @@ function renderPlugins() {
     saveQuiet();
   }));
 }
+
+/* ============ SSH HOSTS ============ */
+// Список читается из ~/.ssh/config при каждом показе вкладки: файл правят и
+// снаружи. Кнопка удаления есть только у блоков с маркером Agora — чужие
+// строки конфига мы не переписываем (Rust откажет в этом повторно).
+interface SshHostRow {
+  alias: string; hostname: string; user: string;
+  port: number; identity: string; forwards: number; managed: boolean;
+}
+
+function sshTarget(h: SshHostRow): string {
+  return (h.user ? h.user + "@" : "") + h.hostname + (h.port === 22 ? "" : ":" + h.port);
+}
+
+async function renderSsh() {
+  const list = $("#sshList");
+  let hosts: SshHostRow[] = [];
+  try { hosts = await invoke<SshHostRow[]>("ssh_hosts"); } catch { /* вне Tauri — пусто */ }
+  list.innerHTML = "";
+  if (!hosts.length) {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = '<div class="txt"><div class="ds"></div></div>';
+    row.querySelector<HTMLElement>(".ds")!.textContent = T("ssh_empty");
+    list.appendChild(row);
+    return;
+  }
+  hosts.forEach(h => {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML =
+      '<div class="txt"><div class="nm"></div><div class="ds"></div></div>' +
+      '<div class="ctl">' +
+      (h.managed ? '<button class="btn" data-ssh-del>✕</button>' : '<span class="pill core"></span>') +
+      '</div>';
+    // textContent, не конкатенация в innerHTML: алиасы и адреса — чужой текст.
+    row.querySelector<HTMLElement>(".nm")!.textContent = h.alias;
+    row.querySelector<HTMLElement>(".ds")!.textContent = sshTarget(h);
+    const del = row.querySelector<HTMLElement>("[data-ssh-del]");
+    if (del) { del.dataset.sshDel = h.alias; del.title = T("ssh_remove"); }
+    const pill = row.querySelector<HTMLElement>(".pill");
+    if (pill) pill.textContent = T("ssh_readonly");
+    list.appendChild(row);
+  });
+  list.querySelectorAll<HTMLElement>("[data-ssh-del]").forEach(btn =>
+    btn.addEventListener("click", async () => {
+      try { await invoke("ssh_remove_host", { alias: btn.dataset.sshDel }); }
+      catch (e) { toast(String(e)); return; }
+      renderSsh();
+    }));
+}
+
+/// Профили Windows Terminal кнопками: список приходит из его settings.json,
+/// первая кнопка — «как по умолчанию» (пустое значение настройки).
+async function renderSshProfiles() {
+  const box = $("#sshProfiles");
+  let profiles: string[] = [];
+  try { profiles = await invoke<string[]>("ssh_wt_profiles"); } catch { /* нет WT — только «по умолчанию» */ }
+  box.innerHTML = "";
+  const mk = (label: string, val: string) => {
+    const b = document.createElement("button");
+    b.className = "btn" + (S.sshProfile === val ? " primary" : "");
+    b.textContent = label;
+    b.addEventListener("click", () => {
+      S.sshProfile = val;
+      renderSshProfiles();
+      saveQuiet();
+    });
+    box.appendChild(b);
+  };
+  mk(T("ssh_wtp_default"), "");
+  profiles.forEach(p => mk(p, p));
+}
+
+async function openSshEditor() {
+  (["#sshAlias", "#sshHost", "#sshUser", "#sshPort", "#sshKey"] as const)
+    .forEach(sel => { $<HTMLInputElement>(sel).value = ""; });
+  const keyInput = $<HTMLInputElement>("#sshKey");
+  const box = $("#sshKeys");
+  box.innerHTML = "";
+  let keys: string[] = [];
+  try { keys = await invoke<string[]>("ssh_keys"); } catch { /* ключей нет — поле пустое */ }
+  keys.forEach(k => {
+    const b = document.createElement("button");
+    b.className = "btn";
+    b.textContent = k.split(/[\\/]/).pop() ?? k;
+    b.title = k;
+    b.addEventListener("click", () => { keyInput.value = k; });
+    box.appendChild(b);
+  });
+  $("#sshEditor").style.display = "";
+  $<HTMLInputElement>("#sshAlias").focus();
+}
+
+$("#sshAdd").addEventListener("click", () => { openSshEditor(); });
+$("#sshCancel").addEventListener("click", () => { $("#sshEditor").style.display = "none"; });
+
+$("#sshSave").addEventListener("click", async () => {
+  const alias = $<HTMLInputElement>("#sshAlias").value.trim();
+  const hostname = $<HTMLInputElement>("#sshHost").value.trim();
+  const user = $<HTMLInputElement>("#sshUser").value.trim();
+  const identity = $<HTMLInputElement>("#sshKey").value.trim();
+  const portRaw = $<HTMLInputElement>("#sshPort").value.trim();
+  const port = portRaw ? Number(portRaw) : 22;
+  // Те же правила, что и в Rust, но с переведённым текстом: иначе пользователь
+  // 17-язычного интерфейса получал бы английскую строку ошибки из бэкенда.
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(alias)) { toast(T("ssh_bad_alias")); return; }
+  if (!hostname || /[\s"\r\n]/.test(hostname)) { toast(T("ssh_bad_host")); return; }
+  if (user && /[\s"\r\n]/.test(user)) { toast(T("ssh_bad_user")); return; }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) { toast(T("ssh_bad_input")); return; }
+  // Rust проверяет всё это повторно и пишет только дозаписью в конец файла.
+  try { await invoke("ssh_add_host", { alias, hostname, user, port, identity }); }
+  catch (e) { toast(String(e)); return; }
+  $("#sshEditor").style.display = "none";
+  renderSsh();
+});
 
 /* ============ INIT ============ */
 (async () => {

@@ -5,6 +5,9 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+/// SSH-плагин: хосты из ssh_config, проба доступности, запуск терминала.
+mod ssh;
+
 #[derive(Serialize, Clone)]
 struct Entry {
     name: String,
@@ -51,7 +54,7 @@ impl Drop for ComGuard {
 fn index_apps() -> Vec<Entry> {
     match enum_apps_folder() {
         Ok(mut v) => {
-            v.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            v.sort_by_key(|e| e.name.to_lowercase());
             v
         }
         Err(_) => Vec::new(),
@@ -162,7 +165,7 @@ fn recent_files() -> Vec<Entry> {
             ));
         }
     }
-    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v.sort_by_key(|x| std::cmp::Reverse(x.0));
     v.into_iter().take(6).map(|(_, e)| e).collect()
 }
 
@@ -456,10 +459,285 @@ fn run_action(app: AppHandle, id: String) -> Result<String, String> {
             }
             .into())
         }
+        "game_mode" => set_pc_mode(true),
+        "work_mode" => set_pc_mode(false),
         _ => Err(format!("unknown action: {id}")),
     }
     #[cfg(not(windows))]
     Err("only windows".into())
+}
+
+#[cfg(windows)]
+use windows::core::GUID;
+#[cfg(windows)]
+use windows::Win32::Foundation::ERROR_SUCCESS;
+#[cfg(windows)]
+use windows::Win32::System::Registry::HKEY;
+
+/// Схемы питания читаем через powrprof, а не парсингом `powercfg /list`:
+/// имена схем локализованы и приходят в OEM-кодировке консоли — из вывода их
+/// не собрать. Заодно не мигает окно консоли. Все вызовы идут в HKEY текущего
+/// пользователя, а это NULL.
+#[cfg(windows)]
+const NO_HKEY: HKEY = HKEY(std::ptr::null_mut());
+
+/// Стандартные схемы Windows — фолбэк, если своих GAME/WORK нет.
+#[cfg(windows)]
+const STD_HIGH_PERF: GUID = GUID::from_u128(0x8c5e_7fda_e8bf_4a96_9a85_a6e2_3a8c_635c);
+#[cfg(windows)]
+const STD_BALANCED: GUID = GUID::from_u128(0x381b_4222_f694_41f0_9685_ff5b_b260_df2e);
+
+/// Отображаемое имя схемы (UTF-16 из powrprof). Пусто, если API его не отдал.
+#[cfg(windows)]
+fn scheme_name(guid: &GUID) -> String {
+    use windows::Win32::System::Power::PowerReadFriendlyName;
+
+    // Первый вызов с пустым буфером — узнать нужный размер в байтах.
+    let mut size: u32 = 0;
+    if unsafe { PowerReadFriendlyName(NO_HKEY, Some(guid), None, None, None, &mut size) }
+        != ERROR_SUCCESS
+    {
+        return String::new();
+    }
+    let mut buf = vec![0u8; size as usize];
+    if unsafe {
+        PowerReadFriendlyName(
+            NO_HKEY,
+            Some(guid),
+            None,
+            None,
+            Some(buf.as_mut_ptr()),
+            &mut size,
+        )
+    } != ERROR_SUCCESS
+    {
+        return String::new();
+    }
+    let utf16: Vec<u16> = buf
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|&c| c != 0)
+        .collect();
+    String::from_utf16_lossy(&utf16)
+}
+
+/// Все схемы питания системы: [(guid, имя)] в порядке `powercfg /list`.
+#[cfg(windows)]
+fn power_schemes() -> Vec<(GUID, String)> {
+    use windows::Win32::System::Power::{PowerEnumerate, ACCESS_SCHEME};
+
+    let mut v = Vec::new();
+    let mut index = 0u32;
+    loop {
+        let mut guid = GUID::from_u128(0);
+        let mut size = std::mem::size_of::<GUID>() as u32;
+        let rc = unsafe {
+            PowerEnumerate(
+                NO_HKEY,
+                None,
+                None,
+                ACCESS_SCHEME,
+                index,
+                Some(std::ptr::from_mut(&mut guid).cast::<u8>()),
+                &mut size,
+            )
+        };
+        // Конец списка (ERROR_NO_MORE_ITEMS) или ошибка — дальше не идём.
+        if rc != ERROR_SUCCESS {
+            return v;
+        }
+        let name = scheme_name(&guid);
+        v.push((guid, name));
+        index += 1;
+    }
+}
+
+/// GUID активной схемы питания.
+#[cfg(windows)]
+fn active_scheme() -> Option<GUID> {
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::System::Power::PowerGetActiveScheme;
+
+    let mut p: *mut GUID = std::ptr::null_mut();
+    if unsafe { PowerGetActiveScheme(NO_HKEY, &mut p) } != ERROR_SUCCESS || p.is_null() {
+        return None;
+    }
+    let guid = unsafe { *p };
+    // Буфер выделен системой через LocalAlloc — освобождаем его.
+    let _ = unsafe { LocalFree(HLOCAL(p.cast())) };
+    Some(guid)
+}
+
+/// Канонический `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` — в таком виде GUID
+/// уходит на фронт.
+#[cfg(windows)]
+fn guid_str(g: &GUID) -> String {
+    let d = g.data4;
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        g.data1, g.data2, g.data3, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]
+    )
+}
+
+/// Обратный разбор: всё, что пришло с фронта, попадает в Win32 только отсюда.
+#[cfg(windows)]
+fn parse_guid(s: &str) -> Option<GUID> {
+    let b = s.as_bytes();
+    if b.len() != 36 || [8, 13, 18, 23].iter().any(|&i| b[i] != b'-') {
+        return None;
+    }
+    let hex: String = s.chars().filter(|c| *c != '-').collect();
+    if hex.len() != 32 || !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    u128::from_str_radix(&hex, 16).ok().map(GUID::from_u128)
+}
+
+/// Схема под режим: сперва пользовательская с именем GAME/WORK, иначе
+/// стандартная Windows. На машинах, где стандартные схемы удалены,
+/// работает только первый путь — поэтому имя приоритетнее.
+#[cfg(windows)]
+fn scheme_for(game: bool) -> Option<GUID> {
+    let want = if game { "GAME" } else { "WORK" };
+    let schemes = power_schemes();
+    if let Some((g, _)) = schemes.iter().find(|(_, n)| n.eq_ignore_ascii_case(want)) {
+        return Some(*g);
+    }
+    let std_guid = if game { STD_HIGH_PERF } else { STD_BALANCED };
+    schemes
+        .iter()
+        .find(|(g, _)| *g == std_guid)
+        .map(|(g, _)| *g)
+}
+
+/// Какой режим ПК активен сейчас: `game` | `work` | `""` (ни то, ни другое).
+/// Определяем по активной схеме питания — она же главный переключатель режима.
+#[cfg(windows)]
+#[tauri::command]
+fn pc_mode() -> String {
+    let Some(active) = active_scheme() else {
+        return String::new();
+    };
+    if let Some((_, name)) = power_schemes().iter().find(|(g, _)| *g == active) {
+        if name.eq_ignore_ascii_case("GAME") {
+            return "game".into();
+        }
+        if name.eq_ignore_ascii_case("WORK") {
+            return "work".into();
+        }
+    }
+    if active == STD_HIGH_PERF {
+        "game".into()
+    } else if active == STD_BALANCED {
+        "work".into()
+    } else {
+        String::new()
+    }
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn pc_mode() -> String {
+    String::new()
+}
+
+/// Схема питания для списка в лаунчере.
+#[derive(Serialize)]
+struct PowerPlan {
+    guid: String,
+    name: String,
+    active: bool,
+}
+
+/// Все схемы из системы (те же, что в `powercfg.cpl`) — для выбора в лаунчере.
+/// GAME/WORK тоже отдаём: как схемы они переключают только питание, а действия
+/// «игровой/рабочий режим» вдобавок трогают Game Mode и уведомления.
+#[cfg(windows)]
+#[tauri::command]
+fn power_plans() -> Vec<PowerPlan> {
+    let active = active_scheme();
+    power_schemes()
+        .into_iter()
+        .filter(|(_, name)| !name.is_empty())
+        .map(|(g, name)| PowerPlan {
+            guid: guid_str(&g),
+            name,
+            active: active == Some(g),
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn power_plans() -> Vec<PowerPlan> {
+    Vec::new()
+}
+
+/// Сделать схему активной.
+#[cfg(windows)]
+#[tauri::command]
+fn set_power_plan(guid: String) -> Result<(), String> {
+    use windows::Win32::System::Power::PowerSetActiveScheme;
+
+    let g = parse_guid(&guid).ok_or("bad guid")?;
+    let rc = unsafe { PowerSetActiveScheme(NO_HKEY, Some(&g)) };
+    if rc == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(format!("powrprof: {}", rc.0))
+    }
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn set_power_plan(_guid: String) -> Result<(), String> {
+    Err("only windows".into())
+}
+
+/// Игровой/рабочий режим ПК. Три обратимых переключателя:
+/// схема питания, Windows Game Mode, тихие уведомления (аналог «Не беспокоить»).
+/// `game=true` — максимум производительности и тишина; `false` — сбалансированно.
+#[cfg(windows)]
+fn set_pc_mode(game: bool) -> Result<String, String> {
+    use windows::Win32::System::Power::PowerSetActiveScheme;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE};
+    use winreg::RegKey;
+
+    // 1) Схема питания: сперва своя GAME/WORK, иначе стандартная Windows.
+    // Если ни той, ни другой нет — питание не трогаем, остальное применяем.
+    if let Some(scheme) = scheme_for(game) {
+        let rc = unsafe { PowerSetActiveScheme(NO_HKEY, Some(&scheme)) };
+        if rc != ERROR_SUCCESS {
+            return Err(format!("powrprof: {}", rc.0));
+        }
+    }
+
+    // Запись DWORD в HKCU: открываем на KEY_WRITE (у системных ключей вроде
+    // PushNotifications KEY_ALL_ACCESS из create_subkey запрещён), ключ создаём
+    // только если его ещё нет.
+    let set_dword = |path: &str, name: &str, val: u32| {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let key = hkcu
+            .open_subkey_with_flags(path, KEY_WRITE)
+            .or_else(|_| hkcu.create_subkey(path).map(|(k, _)| k));
+        if let Ok(k) = key {
+            let _ = k.set_value(name, &val);
+        }
+    };
+    let flag = u32::from(game);
+
+    // 2) Windows Game Mode.
+    set_dword(r"Software\Microsoft\GameBar", "AutoGameModeEnabled", flag);
+    set_dword(r"Software\Microsoft\GameBar", "AllowAutoGameMode", flag);
+
+    // 3) «Не беспокоить»: гасим всплывающие уведомления в игре, возвращаем в работе.
+    set_dword(
+        r"Software\Microsoft\Windows\CurrentVersion\PushNotifications",
+        "ToastEnabled",
+        u32::from(!game),
+    );
+
+    Ok(if game { "Game mode on" } else { "Work mode on" }.into())
 }
 
 /// Сообщаем оболочке о смене темы, иначе часть приложений не подхватит.
@@ -516,8 +794,7 @@ fn get_settings(state: State<'_, SettingsState>) -> serde_json::Value {
     state
         .0
         .lock()
-        .map(|v| v.clone())
-        .unwrap_or(serde_json::Value::Null)
+        .map_or(serde_json::Value::Null, |v| v.clone())
 }
 
 #[tauri::command]
@@ -528,7 +805,21 @@ fn set_settings(
 ) -> Result<(), String> {
     #[cfg(desktop)]
     {
-        apply_hotkeys(&app, &value)?;
+        if let Err(e) = apply_hotkeys(&app, &value) {
+            // Ошибка регистрации могла оставить хоткеи частично снятыми —
+            // возвращаем прежний набор, чтобы вызов лаунчера не умер.
+            let prev = state
+                .0
+                .lock()
+                .map_or_else(|_| serde_json::json!({}), |v| v.clone());
+            if apply_hotkeys(&app, &prev).is_err() {
+                // Прежний набор тоже не регистрируется (например, его хоткей
+                // занят другим приложением) — не оставляем ноль хоткеев,
+                // поднимаем дефолтный Alt+Space.
+                let _ = apply_hotkeys(&app, &serde_json::json!({}));
+            }
+            return Err(e);
+        }
         let tray_on = value
             .get("tray")
             .and_then(serde_json::Value::as_bool)
@@ -552,8 +843,430 @@ fn set_settings(
     if let Ok(mut s) = state.0.lock() {
         *s = value.clone();
     }
+    // Выключили историю буфера — немедленно стираем накопленное из памяти.
+    if value
+        .get("plugins")
+        .and_then(|p| p.get("clipboard"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+    {
+        clip_clear(&app);
+    }
     let _ = app.emit("settings-changed", value);
     Ok(())
+}
+
+/* ======================= CLIPBOARD HISTORY ======================= */
+// История копирований — только в памяти (не на диск: приватность). Фоновый
+// поток опрашивает GetClipboardSequenceNumber (дёшево, без открытия буфера);
+// на смене — читает CF_UNICODETEXT, кладёт в кольцо (последние 50, дедуп).
+// Уважает opt-out парольных менеджеров (ExcludeClipboardContentFromMonitorProcessing).
+
+use std::collections::VecDeque;
+
+struct ClipboardState(Mutex<VecDeque<String>>);
+
+const CLIP_MAX: usize = 50;
+const CLIP_TEXT_CAP: usize = 20_000;
+// Стабильная ABI-константа формата (не тянем Win32_System_Ole ради CF_UNICODETEXT).
+#[cfg(windows)]
+const CF_UNICODETEXT_U32: u32 = 13;
+
+enum ClipRead {
+    Retry, // буфер занят другим процессом — повторить на следующем тике
+    Skip,  // не текст / исключён / пусто — просто пропустить
+    Text(String),
+}
+
+#[cfg(windows)]
+fn wide_z(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn read_clipboard_text() -> ClipRead {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+        RegisterClipboardFormatW,
+    };
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+
+    // SAFETY: OpenClipboard парен CloseClipboard на каждом пути выхода; читаем
+    // заблокированную GlobalLock память в пределах GlobalSize, снимаем GlobalUnlock.
+    unsafe {
+        if OpenClipboard(None).is_err() {
+            return ClipRead::Retry;
+        }
+        let exclude_name = wide_z("ExcludeClipboardContentFromMonitorProcessing");
+        let exclude = RegisterClipboardFormatW(PCWSTR(exclude_name.as_ptr()));
+        if exclude != 0 && IsClipboardFormatAvailable(exclude).is_ok() {
+            let _ = CloseClipboard();
+            return ClipRead::Skip; // менеджер паролей запретил историю
+        }
+        // Второй стандартный opt-out истории Windows: CanIncludeInClipboardHistory
+        // присутствует и его DWORD == 0.
+        let cich_name = wide_z("CanIncludeInClipboardHistory");
+        let cich = RegisterClipboardFormatW(PCWSTR(cich_name.as_ptr()));
+        if cich != 0 && IsClipboardFormatAvailable(cich).is_ok() {
+            if let Ok(h) = GetClipboardData(cich) {
+                if !h.is_invalid() {
+                    let hg = HGLOBAL(h.0);
+                    let p = GlobalLock(hg).cast::<u32>();
+                    let excluded = !p.is_null() && *p == 0;
+                    if !p.is_null() {
+                        let _ = GlobalUnlock(hg);
+                    }
+                    if excluded {
+                        let _ = CloseClipboard();
+                        return ClipRead::Skip;
+                    }
+                }
+            }
+        }
+        if IsClipboardFormatAvailable(CF_UNICODETEXT_U32).is_err() {
+            let _ = CloseClipboard();
+            return ClipRead::Skip; // не текст (картинка/файлы)
+        }
+        let text = match GetClipboardData(CF_UNICODETEXT_U32) {
+            Ok(h) if !h.is_invalid() => {
+                let hg = HGLOBAL(h.0);
+                let ptr = GlobalLock(hg).cast::<u16>();
+                if ptr.is_null() {
+                    None
+                } else {
+                    let max_len = GlobalSize(hg) / 2;
+                    let mut len = 0usize;
+                    while len < max_len && *ptr.add(len) != 0 {
+                        len += 1;
+                    }
+                    let slice = std::slice::from_raw_parts(ptr, len);
+                    let s = String::from_utf16_lossy(slice);
+                    let _ = GlobalUnlock(hg);
+                    Some(s)
+                }
+            }
+            _ => None,
+        };
+        let _ = CloseClipboard();
+        match text {
+            Some(s) if !s.trim().is_empty() => {
+                let s: String = s.chars().take(CLIP_TEXT_CAP).collect();
+                ClipRead::Text(s)
+            }
+            _ => ClipRead::Skip,
+        }
+    }
+}
+
+#[cfg(windows)]
+fn set_clipboard_text(s: &str) -> Result<(), String> {
+    use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+
+    let data = wide_z(s);
+    // SAFETY: hg готовим ДО OpenClipboard/EmptyClipboard — иначе сбой оставил бы
+    // пользователя с пустым буфером. На любой ошибке освобождаем hg; после
+    // успешного SetClipboardData владение hg переходит системе (не освобождаем).
+    unsafe {
+        let hg: HGLOBAL = GlobalAlloc(GMEM_MOVEABLE, data.len() * 2).map_err(|e| e.to_string())?;
+        let ptr = GlobalLock(hg).cast::<u16>();
+        if ptr.is_null() {
+            let _ = GlobalFree(hg);
+            return Err("GlobalLock failed".into());
+        }
+        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+        let _ = GlobalUnlock(hg);
+
+        if let Err(e) = OpenClipboard(None) {
+            let _ = GlobalFree(hg);
+            return Err(e.to_string());
+        }
+        let res = (|| -> Result<(), String> {
+            EmptyClipboard().map_err(|e| e.to_string())?;
+            SetClipboardData(CF_UNICODETEXT_U32, HANDLE(hg.0)).map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        let _ = CloseClipboard();
+        if res.is_err() {
+            let _ = GlobalFree(hg); // владение не перешло системе — освобождаем
+        }
+        res
+    }
+}
+
+#[cfg(not(windows))]
+fn read_clipboard_text() -> ClipRead {
+    ClipRead::Skip
+}
+#[cfg(not(windows))]
+fn set_clipboard_text(_s: &str) -> Result<(), String> {
+    Err("clipboard unsupported on this platform".into())
+}
+
+fn clip_push(app: &AppHandle, s: String) {
+    if let Some(state) = app.try_state::<ClipboardState>() {
+        if let Ok(mut dq) = state.0.lock() {
+            dq.retain(|x| x != &s); // дедуп: старое вхождение убираем
+            dq.push_front(s);
+            while dq.len() > CLIP_MAX {
+                dq.pop_back();
+            }
+        }
+    }
+}
+
+/// Плагин истории буфера включён? (дефолт — да). Настройка живёт в SettingsState.
+fn clipboard_enabled(app: &AppHandle) -> bool {
+    let Some(state) = app.try_state::<SettingsState>() else {
+        return true;
+    };
+    let Ok(v) = state.0.lock() else {
+        return true;
+    };
+    v.get("plugins")
+        .and_then(|p| p.get("clipboard"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Стереть собранную историю из памяти (при отключении плагина).
+fn clip_clear(app: &AppHandle) {
+    if let Some(state) = app.try_state::<ClipboardState>() {
+        if let Ok(mut dq) = state.0.lock() {
+            dq.clear();
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_clipboard_watcher(app: AppHandle) {
+    use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
+    std::thread::spawn(move || {
+        let mut last = unsafe { GetClipboardSequenceNumber() };
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            let seq = unsafe { GetClipboardSequenceNumber() };
+            if seq == last {
+                continue;
+            }
+            // Отключено пользователем — не собираем и чистим уже собранное.
+            if !clipboard_enabled(&app) {
+                clip_clear(&app);
+                last = seq;
+                continue;
+            }
+            match read_clipboard_text() {
+                ClipRead::Retry => {} // буфер занят — не двигаем last, повторим
+                ClipRead::Skip => last = seq,
+                ClipRead::Text(s) => {
+                    last = seq;
+                    clip_push(&app, s);
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn spawn_clipboard_watcher(_app: AppHandle) {}
+
+#[tauri::command]
+fn clipboard_history(app: AppHandle, state: State<'_, ClipboardState>) -> Vec<String> {
+    if !clipboard_enabled(&app) {
+        return Vec::new();
+    }
+    state
+        .0
+        .lock()
+        .map(|dq| dq.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn set_clipboard(text: String) -> Result<(), String> {
+    set_clipboard_text(&text)
+}
+
+/* ======================= PROCESSES (kill) ======================= */
+// Список процессов (имя+pid+рабочее множество) и завершение по pid. Фронт
+// показывает список и «помогает выбрать» — Enter на строке шлёт kill_process(pid).
+
+#[derive(Serialize, Clone)]
+struct ProcInfo {
+    pid: u32,
+    name: String,
+    mem: u64, // working set, байты
+}
+
+/// Всегда-критические образы: их завершение роняет систему (CRITICAL_PROCESS_DIED).
+/// Первый барьер (не показываем в списке); второй — IsProcessCritical в kill_process.
+fn is_critical_name(name: &str) -> bool {
+    const CRIT: &[&str] = &[
+        "csrss.exe",
+        "wininit.exe",
+        "winlogon.exe",
+        "services.exe",
+        "lsass.exe",
+        "smss.exe",
+        "system",
+        "registry",
+    ];
+    let n = name.to_ascii_lowercase();
+    CRIT.contains(&n.as_str())
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn list_processes() -> Vec<ProcInfo> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let self_pid = std::process::id();
+    let mut out: Vec<ProcInfo> = Vec::new();
+    // SAFETY: снапшот закрываем; заполняем только переданную PROCESSENTRY32W
+    // (dwSize выставлен перед Process32FirstW).
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return out;
+        };
+        let mut e = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        if Process32FirstW(snap, &mut e).is_ok() {
+            loop {
+                let pid = e.th32ProcessID;
+                let n = e
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(e.szExeFile.len());
+                let name = String::from_utf16_lossy(&e.szExeFile[..n]);
+                // Прячем: System (0/4), себя и свои дочерние (WebView2), критические
+                // системные процессы (их завершение = BSOD).
+                if pid != 0
+                    && pid != 4
+                    && pid != self_pid
+                    && e.th32ParentProcessID != self_pid
+                    && !name.is_empty()
+                    && !is_critical_name(&name)
+                {
+                    out.push(ProcInfo {
+                        pid,
+                        name,
+                        mem: proc_working_set(pid),
+                    });
+                }
+                if Process32NextW(snap, &mut e).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+    // Крупные потребители памяти — сверху (их чаще и «килляют»).
+    out.sort_by_key(|b| std::cmp::Reverse(b.mem));
+    out
+}
+
+#[cfg(windows)]
+fn proc_working_set(pid: u32) -> u64 {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    // SAFETY: хэндл закрываем; GetProcessMemoryInfo заполняет переданную структуру.
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return 0;
+        };
+        let mut pmc = PROCESS_MEMORY_COUNTERS::default();
+        let cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let ws = if GetProcessMemoryInfo(h, &mut pmc, cb).is_ok() {
+            pmc.WorkingSetSize as u64
+        } else {
+            0
+        };
+        let _ = CloseHandle(h);
+        ws
+    }
+}
+
+/// Имя exe-файла процесса по открытому хэндлу (QueryFullProcessImageNameW).
+#[cfg(windows)]
+fn image_file_name(h: windows::Win32::Foundation::HANDLE) -> Option<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_WIN32};
+
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    // SAFETY: буфер валиден, len — его ёмкость; API пишет не больше len UTF-16 юнитов.
+    unsafe { QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len) }
+        .ok()?;
+    let full = String::from_utf16_lossy(&buf[..len as usize]);
+    full.rsplit(['\\', '/']).next().map(str::to_string)
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn kill_process(pid: u32) -> Result<(), String> {
+    use windows::Win32::Foundation::{CloseHandle, BOOL, ERROR_ACCESS_DENIED};
+    use windows::Win32::System::Threading::{
+        IsProcessCritical, OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_TERMINATE,
+    };
+
+    // SAFETY: хэндл закрываем на всех путях; Is/Terminate принимают валидный хэндл.
+    unsafe {
+        let h = match OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            pid,
+        ) {
+            Ok(h) => h,
+            // Точная причина вместо всегда-«нужен админ»: мёртвый pid, PPL и т.п.
+            Err(e) if e.code() == ERROR_ACCESS_DENIED.to_hresult() => {
+                return Err("Нет доступа (нужны права администратора)".into());
+            }
+            Err(e) => return Err(e.message()),
+        };
+        // Денилист имён повторно, уже по pid из IPC (list_processes фильтрует
+        // только выдачу): под админом IsProcessCritical не флагает lsass/services,
+        // а их завершение форсит перезагрузку системы.
+        if image_file_name(h).is_some_and(|n| is_critical_name(&n)) {
+            let _ = CloseHandle(h);
+            return Err("Критический системный процесс — завершение запрещено".into());
+        }
+        // Критический процесс (ProcessBreakOnTermination) — завершение = BSOD.
+        // Второй барьер к денилисту имён: отказываем даже под админом.
+        let mut crit = BOOL::default();
+        if IsProcessCritical(h, &mut crit).is_ok() && crit.as_bool() {
+            let _ = CloseHandle(h);
+            return Err("Критический системный процесс — завершение запрещено".into());
+        }
+        let res = TerminateProcess(h, 1).map_err(|e| e.to_string());
+        let _ = CloseHandle(h);
+        res
+    }
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn list_processes() -> Vec<ProcInfo> {
+    Vec::new()
+}
+#[cfg(not(windows))]
+#[tauri::command]
+fn kill_process(_pid: u32) -> Result<(), String> {
+    Err("process control unsupported on this platform".into())
 }
 
 /// Цель кастомного бинда: shell:AppsFolder-элементы через explorer,
@@ -567,29 +1280,21 @@ fn run_bind_target(target: &str) -> Result<(), String> {
 }
 
 /// (Пере)регистрация ВСЕХ глобальных хоткеев: вызов лаунчера + свои бинды
-/// из настроек. Снимает прежние; ошибка любого — откат всей записи настроек.
+/// из настроек. Сначала парсит всё (битый хоткей не снимает работающие),
+/// только потом перерегистрирует; ошибку регистрации откатывает set_settings.
 #[cfg(desktop)]
 fn apply_hotkeys(app: &AppHandle, settings: &serde_json::Value) -> Result<(), String> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
-
-    let gs = app.global_shortcut();
-    let _ = gs.unregister_all();
 
     let hk = settings
         .get("hotkey")
         .and_then(|v| v.as_str())
         .unwrap_or(DEFAULT_HOTKEY);
-    let sc: Shortcut = hk
+    let main_sc: Shortcut = hk
         .parse()
         .map_err(|e| format!("Bad hotkey '{hk}': {e:?}"))?;
-    let handle = app.clone();
-    gs.on_shortcut(sc, move |_app, _sc, event| {
-        if event.state() == ShortcutState::Pressed {
-            toggle_window(&handle);
-        }
-    })
-    .map_err(|e| e.to_string())?;
 
+    let mut bind_scs: Vec<(Shortcut, String, String)> = Vec::new();
     if let Some(binds) = settings.get("binds").and_then(|v| v.as_array()) {
         for b in binds {
             let (Some(hk), Some(target)) = (
@@ -602,14 +1307,28 @@ fn apply_hotkeys(app: &AppHandle, settings: &serde_json::Value) -> Result<(), St
             let sc: Shortcut = hk
                 .parse()
                 .map_err(|e| format!("'{name}': bad hotkey '{hk}': {e:?}"))?;
-            let target = target.to_string();
-            gs.on_shortcut(sc, move |_app, _sc, event| {
-                if event.state() == ShortcutState::Pressed {
-                    let _ = run_bind_target(&target);
-                }
-            })
-            .map_err(|e| format!("'{name}': {e}"))?;
+            bind_scs.push((sc, name.to_string(), target.to_string()));
         }
+    }
+
+    let gs = app.global_shortcut();
+    let _ = gs.unregister_all();
+
+    let handle = app.clone();
+    gs.on_shortcut(main_sc, move |_app, _sc, event| {
+        if event.state() == ShortcutState::Pressed {
+            toggle_window(&handle);
+        }
+    })
+    .map_err(|e| e.to_string())?;
+
+    for (sc, name, target) in bind_scs {
+        gs.on_shortcut(sc, move |_app, _sc, event| {
+            if event.state() == ShortcutState::Pressed {
+                let _ = run_bind_target(&target);
+            }
+        })
+        .map_err(|e| format!("'{name}': {e}"))?;
     }
     Ok(())
 }
@@ -622,8 +1341,58 @@ fn show_settings(app: &AppHandle) {
     }
 }
 
-/// Спотлайт-позиция: по центру, верхняя треть экрана.
+/// Полный `MONITORINFO` монитора под курсором мыши (физические px виртуального
+/// рабочего стола). Процесс per-monitor-v2 DPI-aware (Tauri v2 через tao),
+/// поэтому GetCursorPos, MonitorFromPoint и rcMonitor/rcWork живут в одном
+/// координатном пространстве — без DPI-коррекции.
+#[cfg(windows)]
+fn cursor_monitor_info() -> Option<windows::Win32::Graphics::Gdi::MONITORINFO> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut pt = POINT::default();
+    // SAFETY: pt — валидный &mut POINT; вызовы лишь заполняют переданные структуры.
+    unsafe { GetCursorPos(&mut pt) }.ok()?;
+    let mon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetMonitorInfoW(mon, &mut mi) }.as_bool() {
+        Some(mi)
+    } else {
+        None
+    }
+}
+
+/// Спотлайт-позиция: центр монитора ПОД КУРСОРОМ, верхняя треть.
+/// Монитор берём по мыши (сигнал «где сейчас пользователь»), а не по
+/// current_monitor() — скрытое окно всё ещё числится на старом (обычно
+/// главном) мониторе, из-за чего лаунчер всегда открывался не там.
 fn position_spotlight(w: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    if let Some(mi) = cursor_monitor_info() {
+        let m = mi.rcMonitor;
+        // Шаг 1: перенести окно на целевой монитор. Если у него DPI отличается
+        // от текущего (2K@150% vs FHD@100%), tao по WM_DPICHANGED сам ресайзит
+        // окно под масштаб цели. set_position с не-main потока асинхронный, но
+        // блокирующий outer_size() ниже — барьер: событийный цикл FIFO, к моменту
+        // его ответа перенос и смена DPI уже применены.
+        let _ = w.set_position(tauri::PhysicalPosition::new(m.left, m.top));
+        // Шаг 2: outer_size уже в физ. px целевого монитора → точный центр по
+        // горизонтали независимо от разрешения/масштаба.
+        if let Ok(size) = w.outer_size() {
+            let x = m.left + ((m.right - m.left) - size.width as i32) / 2;
+            let y = m.top + (f64::from(m.bottom - m.top) * 0.16) as i32;
+            let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+            return;
+        }
+    }
+
+    // Деградация (GetCursorPos не сработал / нет монитора): current_monitor → center.
     if let (Ok(Some(mon)), Ok(size)) = (w.current_monitor(), w.outer_size()) {
         let mpos = mon.position();
         let msize = mon.size();
@@ -757,9 +1526,20 @@ fn build_tray(app: &AppHandle, lang: &str) -> tauri::Result<()> {
 // Точка входа: паника при инициализации Tauri — невосстановимый баг старта,
 // а не рантайм-путь. expect здесь оправдан.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-#[allow(clippy::expect_used, clippy::missing_panics_doc)]
+#[allow(
+    clippy::expect_used,
+    clippy::missing_panics_doc,
+    clippy::too_many_lines
+)]
 pub fn run() {
     tauri::Builder::default()
+        // Первым: повторный запуск exe не плодит второй трей/watcher,
+        // а показывает лаунчер уже работающего экземпляра. Колбэк может
+        // прилететь до создания окна «main» (WebView2 качает сообщения при
+        // старте) — show_window тогда тихий no-op, это осознанно.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_window(app);
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_autostart::init(
@@ -767,6 +1547,7 @@ pub fn run() {
             Some(vec![]),
         ))
         .manage(IconCache::default())
+        .manage(ClipboardState(Mutex::new(VecDeque::new())))
         .invoke_handler(tauri::generate_handler![
             index_apps,
             recent_files,
@@ -774,8 +1555,23 @@ pub fn run() {
             open_path,
             open_url,
             run_action,
+            pc_mode,
+            power_plans,
+            set_power_plan,
             get_settings,
             set_settings,
+            clipboard_history,
+            set_clipboard,
+            list_processes,
+            kill_process,
+            ssh::ssh_hosts,
+            ssh::ssh_probe,
+            ssh::ssh_client_present,
+            ssh::ssh_wt_profiles,
+            ssh::ssh_open,
+            ssh::ssh_add_host,
+            ssh::ssh_remove_host,
+            ssh::ssh_keys,
             quit
         ])
         .setup(|app| {
@@ -796,33 +1592,27 @@ pub fn run() {
                     .and_then(|v| v.as_str())
                     .unwrap_or("en")
                     .to_string();
-                let autoupdate = initial
-                    .get("autoupdate")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(true);
-
+                let mut initial = initial;
                 if let Err(e) = apply_hotkeys(app.handle(), &initial) {
                     // Хоткей занят/битый — пробуем дефолты, иначе живём через трей.
                     eprintln!("nexalix-agora: {e}");
-                    let _ = apply_hotkeys(app.handle(), &serde_json::json!({}));
+                    if apply_hotkeys(app.handle(), &serde_json::json!({})).is_ok() {
+                        // Состояние должно отражать реально активный хоткей —
+                        // иначе любой set_settings перерегистрирует битый и
+                        // снесёт работающий дефолтный.
+                        if let Some(o) = initial.as_object_mut() {
+                            o.insert("hotkey".into(), DEFAULT_HOTKEY.into());
+                        }
+                    }
                 }
                 app.manage(SettingsState(Mutex::new(initial)));
 
-                // Тихая проверка обновлений при старте. NSIS ставится silent,
-                // приложение перезапускается установщиком. Ошибки глотаем —
-                // нет сети/релиза ещё нет — не повод шуметь.
-                if autoupdate {
-                    let handle = app.handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        use tauri_plugin_updater::UpdaterExt;
-                        let Ok(updater) = handle.updater() else {
-                            return;
-                        };
-                        if let Ok(Some(update)) = updater.check().await {
-                            let _ = update.download_and_install(|_, _| {}, || {}).await;
-                        }
-                    });
-                }
+                // Фоновый наблюдатель за буфером обмена (история копирований).
+                spawn_clipboard_watcher(app.handle().clone());
+
+                // Обновления не ставим за спиной у пользователя: фоновой
+                // проверкой и предложением занимается лаунчер (main.ts), а
+                // установку запускает уже подтверждение — см. UPDATE там.
 
                 // Автозапуск включаем по умолчанию только при первом запуске.
                 if let Ok(dir) = app.path().app_config_dir() {

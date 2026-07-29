@@ -136,6 +136,17 @@ body.light .launcher {
 }
 .row.active .tail { opacity: 1; }
 
+/* SSH — доступность хоста видна на всех строках, не только на активной.
+   Симметричные отступы (без margin-left/right) — иначе строка поедет в RTL. */
+.ping {
+  flex: 0 0 auto; padding: 0 2px;
+  font-size: 12.5px; color: var(--subtle);
+  font-variant-numeric: tabular-nums;
+}
+.ping.ok   { color: var(--good); }
+.ping.slow { color: var(--muted); }
+.ping.bad  { color: var(--subtle); opacity: .7; }
+
 /* калькулятор — единственное место, где значение говорит само */
 .row.answer .glyph { color: var(--good); opacity: 1; }
 .row.answer .name { color: var(--muted); font-size: 13.5px; }
